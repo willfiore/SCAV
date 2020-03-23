@@ -8,8 +8,12 @@ edition = "2018"
 
 [dependencies]
 arrayvec = "*"
+array_tool = "*"
 log = "*"
 simple_logger = "*"
 winit = "*"
-gfx-hal = "*"
-gfx-backend-vulkan = "*"
+ash = "*"
+
+[build-dependencies]
+shaderc-sys = "*"
+shaderc = "*"
