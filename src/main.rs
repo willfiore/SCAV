@@ -1,3 +1,5 @@
+#![windows_subsystem = "windows"]
+
 use winit::{
     event::{Event, WindowEvent},
     event_loop::{ControlFlow, EventLoop},
@@ -293,8 +295,6 @@ fn main() {
         max_depth: 1.0
     };
 
-    println!("{:#?}", viewport);
-
     // Scissor - region of the framebuffer where output is not discarded (crops output)
     let scissor = vk::Rect2D {
         offset: vk::Offset2D {
@@ -306,8 +306,6 @@ fn main() {
 
     let viewports = [viewport];
     let scissors = [scissor];
-
-    println!("{:#?}", scissors);
 
     // ViewportState - combines viewports and scissors
     let viewport_state_create_info = vk::PipelineViewportStateCreateInfo::builder()
@@ -368,8 +366,6 @@ fn main() {
     let pipeline_layout_create_info = vk::PipelineLayoutCreateInfo::builder();
         // .set_layouts(&[])
         // .push_constant_ranges(&[]);
-
-    println!("{:#?}", *pipeline_layout_create_info);
 
     let pipeline_layout = unsafe { device.create_pipeline_layout(&pipeline_layout_create_info, None) }
         .expect("Failed to create pipeline layout");
@@ -433,8 +429,6 @@ fn main() {
         .subpass(0)
         .base_pipeline_handle(vk::Pipeline::null())
         .base_pipeline_index(-1);
-
-    println!("{:#?}", *graphics_pipeline_create_info);
 
     let pipeline = unsafe {
         device.create_graphics_pipelines(vk::PipelineCache::null(), &[*graphics_pipeline_create_info], None)
@@ -535,41 +529,43 @@ fn main() {
 
         match event {
             Event::WindowEvent { event: WindowEvent::CloseRequested, .. } => {
-                *control_flow = ControlFlow::Exit;
 
+                // TODO: Why is this hanging?
                 // Vulkan cleanup
-                unsafe {
-                    device.device_wait_idle();
+                // unsafe {
+                //     device.device_wait_idle();
 
-                    device.destroy_semaphore(image_available_semaphore, None);
-                    device.destroy_semaphore(render_finished_semaphore, None);
+                //     device.destroy_semaphore(image_available_semaphore, None);
+                //     device.destroy_semaphore(render_finished_semaphore, None);
 
-                    device.destroy_command_pool(command_pool, None);
-                    device.destroy_pipeline(pipeline, None);
-                    device.destroy_pipeline_layout(pipeline_layout, None);
+                //     device.destroy_command_pool(command_pool, None);
+                //     device.destroy_pipeline(pipeline, None);
+                //     device.destroy_pipeline_layout(pipeline_layout, None);
 
-                    framebuffers.iter().for_each(|&fb| {
-                        device.destroy_framebuffer(fb, None);
-                    });
+                //     framebuffers.iter().for_each(|&fb| {
+                //         device.destroy_framebuffer(fb, None);
+                //     });
 
-                    device.destroy_render_pass(render_pass, None);
+                //     device.destroy_render_pass(render_pass, None);
 
+                //     swapchain_image_views.iter().for_each(|&v| {
+                //         device.destroy_image_view(v, None);
+                //     });
 
-                    swapchain_image_views.iter().for_each(|&v| {
-                        device.destroy_image_view(v, None);
-                    });
+                //     swapchain_loader.destroy_swapchain(swapchain, None);
+                //     surface_loader.destroy_surface(surface, None);
+                //     device.destroy_device(None);
+                //     instance.destroy_instance(None);
+                // }
 
-                    swapchain_loader.destroy_swapchain(swapchain, None);
-                    surface_loader.destroy_surface(surface, None);
-                    device.destroy_device(None);
-                    instance.destroy_instance(None);
-                }
+                *control_flow = ControlFlow::Exit;
             },
             Event::MainEventsCleared => {
                 // Application update code
                 window.request_redraw();
             },
             Event::RedrawRequested(_) => {
+
                 // Redraw the application
                 // Redrawing here instead of MainEventsCleared allows redraws
                 // requested by the OS
