@@ -238,7 +238,7 @@ fn main() {
     let shader_function_entry_point = CString::new("main").unwrap();
 
     let vertex_shader_module = {
-        let mut spv_file = Cursor::new(&include_bytes!("../assets/shaders/basic.vert.spv")[..]);
+        let mut spv_file = Cursor::new(&include_bytes!("../generated/shaders/basic.vert.spv")[..]);
         let code = ash::util::read_spv(&mut spv_file)
             .expect("Failed to read vertex shader spv file");
 
@@ -250,7 +250,7 @@ fn main() {
     };
 
     let fragment_shader_module = {
-        let mut spv_file = Cursor::new(&include_bytes!("../assets/shaders/basic.frag.spv")[..]);
+        let mut spv_file = Cursor::new(&include_bytes!("../generated/shaders/basic.frag.spv")[..]);
         let code = ash::util::read_spv(&mut spv_file)
             .expect("Failed to read fragment shader spv file");
 

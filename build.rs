@@ -6,9 +6,10 @@ use shaderc::{ShaderKind};
 fn main() -> Result<(), Box<dyn Error>> {
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-changed=src/shaders");
+    println!("cargo:rerun-if-changed=generated");
 
     // Create destination path if necessary
-    std::fs::create_dir_all("assets/shaders")?;
+    std::fs::create_dir_all("generated/shaders")?;
 
     let mut compiler = shaderc::Compiler::new()
         .expect("Failed to create compiler");
@@ -41,7 +42,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                     .expect("Failed to compile shader");
 
                 let out_path = format!(
-                    "assets/shaders/{}.spv",
+                    "generated/shaders/{}.spv",
                     file_name.rsplitn(2, ".").last().unwrap()
                 );
 
