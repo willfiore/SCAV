@@ -512,15 +512,44 @@ fn main() {
             .expect("Failed to end command buffer");
     });
 
-    // SEMAPHORES
+    // SEMAPHORES AND FENCES
+
+    // Semaphores are sync primitives internal to the GPU, they handle synchronization
+    // between stages of the GPU.
+
+    // Fences are for CPU <-> GPU synchronization
+
+    const MAX_FRAMES_IN_FLIGHT: usize = 3;
 
     let semaphore_create_info = vk::SemaphoreCreateInfo::builder();
 
-    let image_available_semaphore = unsafe { device.create_semaphore(&semaphore_create_info, None) }
-        .expect("Failed to create semaphore");
+    let fence_create_info = vk::FenceCreateInfo::builder()
+        .flags(vk::FenceCreateFlags::SIGNALED);
 
-    let render_finished_semaphore = unsafe { device.create_semaphore(&semaphore_create_info, None) }
-        .expect("Failed to create semaphore");
+    // Semaphore, per frame in flight, which is signalled after the image
+    // is acquired from the swapchain. Queued command buffers start
+    // after this is signalled
+    let image_available_semaphores = (0..MAX_FRAMES_IN_FLIGHT).map(|_| {
+        unsafe { device.create_semaphore(&semaphore_create_info, None) }
+            .expect("Failed to create semaphore")
+    }).collect::<Vec<_>>();
+
+    // Signalled after submitted command buffers finish rendering.
+    // Surface present waits until this is signalled before presenting
+    // the final framebuffer to the screen
+    let render_finished_semaphores = (0..MAX_FRAMES_IN_FLIGHT).map(|_| {
+        unsafe { device.create_semaphore(&semaphore_create_info, None) }
+            .expect("Failed to create semaphore")
+    }).collect::<Vec<_>>();
+
+    let in_flight_frame_fences = (0..MAX_FRAMES_IN_FLIGHT).map(|_| {
+        unsafe { device.create_fence(&fence_create_info, None) }
+            .expect("Failed to create fence")
+    }).collect::<Vec<_>>();
+
+    let mut in_flight_image_fences = vec![vk::Fence::null(); swapchain_images.len()];
+
+    let mut current_frame: usize = 0;
 
     event_loop.run(move |event, _, control_flow| {
 
@@ -535,8 +564,15 @@ fn main() {
                 // unsafe {
                 //     device.device_wait_idle();
 
-                //     device.destroy_semaphore(image_available_semaphore, None);
-                //     device.destroy_semaphore(render_finished_semaphore, None);
+                // image_available_semaphores.iter().for_each(|&s| {
+                //     device.destroy_semaphore(s, None);
+                // });
+                //
+                // render_finished_semaphores.iter().for_each(|&s| {
+                //     device.destroy_semaphore(s, None);
+                // });
+
+                // TODO: Destroy fences
 
                 //     device.destroy_command_pool(command_pool, None);
                 //     device.destroy_pipeline(pipeline, None);
@@ -570,22 +606,38 @@ fn main() {
                 // Redrawing here instead of MainEventsCleared allows redraws
                 // requested by the OS
 
-                unsafe { device.queue_wait_idle(present_queue) };
+                current_frame = (current_frame + 1) % MAX_FRAMES_IN_FLIGHT;
+
+                // Ensure that there are no more than MAX_FRAMES_IN_FLIGHT frames
+                // in the pipeline at once
+                let wait_frame_fences = [in_flight_frame_fences[current_frame]];
+                unsafe { device.wait_for_fences(&wait_frame_fences, true, u64::max_value()); }
 
                 let (image_index, suboptimal) = unsafe {
                     swapchain_loader.acquire_next_image(
                         swapchain,
                         u64::max_value(),
-                        image_available_semaphore,
+                        image_available_semaphores[current_frame],
                         vk::Fence::null()
                     )}.expect("Failed to acquire next image");
 
-                let wait_semaphores = [image_available_semaphore];
+                let image_index = image_index as usize;
+
+                // Ensure that a current frame in flight isn't using this swapchain image
+                if in_flight_image_fences[image_index] != vk::Fence::null() {
+                    let wait_image_fences = [in_flight_image_fences[image_index]];
+                    unsafe { device.wait_for_fences(&wait_image_fences, true, u64::max_value()); }
+                }
+
+                // Mark this swapchain image as now being used by this frame
+                in_flight_image_fences[image_index] = in_flight_frame_fences[current_frame];
+
+                let wait_semaphores = [image_available_semaphores[current_frame]];
                 let wait_stages = [vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT];
 
-                let signal_semaphores = [render_finished_semaphore];
+                let signal_semaphores = [render_finished_semaphores[current_frame]];
 
-                let current_command_buffers = [command_buffers[image_index as usize]];
+                let current_command_buffers = [command_buffers[image_index]];
 
                 let submit_info = vk::SubmitInfo::builder()
                     .command_buffers(&current_command_buffers)
@@ -595,11 +647,13 @@ fn main() {
 
                 let submit_infos = [*submit_info];
 
-                unsafe { device.queue_submit(graphics_queue, &submit_infos, vk::Fence::null()) }
-                    .expect("Failed to submit draw command buffer");
+                unsafe {
+                    device.reset_fences(&wait_frame_fences);
+                    device.queue_submit(graphics_queue, &submit_infos, in_flight_frame_fences[current_frame])
+                }.expect("Failed to submit draw command buffer");
 
                 let swapchains = [swapchain];
-                let image_indices = [image_index];
+                let image_indices = [image_index as u32];
 
                 let present_info = vk::PresentInfoKHR::builder()
                     .wait_semaphores(&signal_semaphores)
@@ -608,7 +662,7 @@ fn main() {
 
                 unsafe {
                     swapchain_loader.queue_present(present_queue, &present_info);
-                };
+                }
             },
             _ => {}
         }
