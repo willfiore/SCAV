@@ -3,7 +3,7 @@ extern crate nalgebra as na;
 use ash::vk;
 use ash::extensions::khr;
 use ash::util::Align;
-use std::ffi::{CString};
+use std::ffi::{CString, c_void};
 use ash::version::{EntryV1_0, InstanceV1_0, DeviceV1_0};
 use std::io::Cursor;
 
@@ -14,7 +14,7 @@ use winit::{
 use ash::prelude::VkResult;
 
 #[repr(C)]
-#[derive(Copy, Clone)]
+#[derive(Debug, Clone, Copy)]
 struct Vertex {
     position: na::Vector2<f32>,
     color: na::Vector3<f32>
@@ -59,6 +59,12 @@ fn extension_names() -> Vec<*const i8> {
     ]
 }
 
+#[derive(Debug, Clone, Copy)]
+struct BufferRegion {
+    offset: vk::DeviceSize,
+    size: vk::DeviceSize,
+}
+
 static MAX_FRAMES_IN_FLIGHT: usize = 3;
 
 /// Vulkan renderer
@@ -67,19 +73,29 @@ pub struct Renderer {
     instance: ash::Instance,
     physical_device: vk::PhysicalDevice,
     device: ash::Device,
+
     surface: vk::SurfaceKHR,
     surface_loader: ash::extensions::khr::Surface,
+
     graphics_queue: vk::Queue,
     present_queue: vk::Queue,
+
     current_frame: usize,
+
     in_flight_frame_fences: Vec<vk::Fence>,
     in_flight_image_fences: Vec<vk::Fence>,
+
     swapchain_loader: ash::extensions::khr::Swapchain,
     swapchain: vk::SwapchainKHR,
+
     command_pool: vk::CommandPool,
     command_buffers: Vec<vk::CommandBuffer>,
+
     image_available_semaphores: Vec<vk::Semaphore>,
     render_finished_semaphores: Vec<vk::Semaphore>,
+
+    buffer_vertex_region: BufferRegion,
+    buffer_index_region: BufferRegion,
 }
 
 fn find_memory_type_index(type_filter: u32, properties: vk::MemoryPropertyFlags,
@@ -148,8 +164,14 @@ fn create_buffer(instance: &ash::Instance,
     Ok((vertex_buffer, vertex_buffer_memory))
 }
 
-fn copy_buffer(src_buffer: vk::Buffer, dst_buffer: vk::Buffer, size: vk::DeviceSize,
-               command_pool: vk::CommandPool, device: &ash::Device, submit_queue: vk::Queue)
+fn copy_buffer(src_buffer: vk::Buffer,
+               dst_buffer: vk::Buffer,
+               size: vk::DeviceSize,
+               src_offset: vk::DeviceSize,
+               dst_offset: vk::DeviceSize,
+               command_pool: vk::CommandPool,
+               device: &ash::Device,
+               submit_queue: vk::Queue)
     -> Result<(), ()>
 {
     unsafe {
@@ -166,8 +188,8 @@ fn copy_buffer(src_buffer: vk::Buffer, dst_buffer: vk::Buffer, size: vk::DeviceS
             .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
 
         let buffer_copy = vk::BufferCopy::builder()
-            .src_offset(0)
-            .dst_offset(0)
+            .src_offset(src_offset)
+            .dst_offset(dst_offset)
             .size(size);
 
         let regions = [*buffer_copy];
@@ -190,6 +212,18 @@ fn copy_buffer(src_buffer: vk::Buffer, dst_buffer: vk::Buffer, size: vk::DeviceS
     }
 
     Ok(())
+}
+
+fn upload_to_buffer<T>(buffer_ptr: *mut c_void, slice: &[T])
+    where T: Copy
+{
+    let align = std::mem::align_of::<T>() as u64;
+    let size = (slice.len() * std::mem::size_of::<T>()) as u64;
+
+    unsafe {
+        let mut vk_align = Align::new(buffer_ptr, align, size);
+        vk_align.copy_from_slice(slice);
+    }
 }
 
 impl Renderer {
@@ -637,50 +671,55 @@ impl Renderer {
         let command_pool = unsafe { device.create_command_pool(&command_pool_create_info, None) }
             .expect("Failed to create command pool");
 
-        // VERTEX BUFFER
+        // BUFFERS
+
+        let buffer_vertex_region = BufferRegion { offset: 0, size: 1000 };
+        let buffer_index_region = BufferRegion { offset: buffer_vertex_region.size, size: 10 * 1024 * 1024};
+
+        let staging_buffer_size = 20 * 1024 * 1024;
+        let total_buffer_size = buffer_vertex_region.size + buffer_index_region.size;
 
         // Vertices
-        let vertices = vec![
-            Vertex { position: na::Vector2::new( 0.5,  0.5), color: na::Vector3::new(0.0, 1.0, 0.0) },
-            Vertex { position: na::Vector2::new( 0.0, -0.5), color: na::Vector3::new(1.0, 0.0, 0.0) },
-            Vertex { position: na::Vector2::new(-0.5,  0.5), color: na::Vector3::new(0.0, 0.0, 1.0) },
+        let vertices = [
+            Vertex { position: na::Vector2::new(-0.5,  0.5), color: na::Vector3::new(1.0, 0.0, 1.0) },
+            Vertex { position: na::Vector2::new( 0.5,  0.5), color: na::Vector3::new(1.0, 0.0, 1.0) },
+            Vertex { position: na::Vector2::new( 0.5, -0.5), color: na::Vector3::new(1.0, 1.0, 1.0) },
+            Vertex { position: na::Vector2::new(-0.5, -0.5), color: na::Vector3::new(1.0, 1.0, 1.0) },
         ];
 
-        let buffer_size = (std::mem::size_of::<Vertex>() * vertices.len()) as u64;
+        let indices = [0u16, 1, 2, 2, 3, 0];
+
+        let vertices_size = (std::mem::size_of::<Vertex>() * vertices.len()) as u64;
+        let indices_size = (std::mem::size_of::<u16>() * indices.len()) as u64;
 
         let (staging_buffer, staging_buffer_memory) = create_buffer(
             &instance, &device, physical_device,
-            buffer_size,
+            staging_buffer_size,
             vk::BufferUsageFlags::TRANSFER_SRC,
             vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
         ).expect("Failed to create staging buffer");
 
-        let (vertex_buffer, vertex_buffer_memory) = create_buffer(
+        let (buffer, buffer_memory) = create_buffer(
             &instance, &device, physical_device,
-            buffer_size,
-            vk::BufferUsageFlags::TRANSFER_DST | vk::BufferUsageFlags::VERTEX_BUFFER,
+            total_buffer_size,
+            vk::BufferUsageFlags::TRANSFER_DST |
+                vk::BufferUsageFlags::VERTEX_BUFFER | vk::BufferUsageFlags::INDEX_BUFFER,
             vk::MemoryPropertyFlags::DEVICE_LOCAL,
         ).expect("Failed to create vertex buffer");
 
         // Fill memory
         let staging_buffer_memory_ptr = unsafe {
-            device.map_memory(staging_buffer_memory, 0, buffer_size, vk::MemoryMapFlags::empty())
+            device.map_memory(staging_buffer_memory, 0, vertices_size, vk::MemoryMapFlags::empty())
                 .expect("Failed to map memory")
         };
 
-        let mut vert_align = unsafe {
-            Align::new(
-                staging_buffer_memory_ptr,
-                std::mem::align_of::<Vertex>() as u64,
-                buffer_size
-            )
-        };
+        upload_to_buffer(staging_buffer_memory_ptr, &vertices);
+        copy_buffer(staging_buffer, buffer, vertices_size, 0, 0, command_pool, &device, graphics_queue);
 
-        vert_align.copy_from_slice(&vertices);
+        upload_to_buffer(staging_buffer_memory_ptr, &indices);
+        copy_buffer(staging_buffer, buffer, indices_size, 0, buffer_index_region.offset, command_pool, &device, graphics_queue);
 
         unsafe { device.unmap_memory(staging_buffer_memory) };
-
-        copy_buffer(staging_buffer, vertex_buffer, buffer_size, command_pool, &device, graphics_queue);
 
         // COMMAND BUFFERS
 
@@ -721,11 +760,12 @@ impl Renderer {
                 device.cmd_begin_render_pass(command_buffer, &render_pass_begin_info, vk::SubpassContents::INLINE);
                 device.cmd_bind_pipeline(command_buffer, vk::PipelineBindPoint::GRAPHICS, pipeline);
 
-                let vertex_buffers = [vertex_buffer];
+                let buffers = [buffer];
                 let offsets = [0];
 
-                device.cmd_bind_vertex_buffers(command_buffer, 0, &vertex_buffers, &offsets);
-                device.cmd_draw(command_buffer, vertices.len() as u32, 1, 0, 0);
+                device.cmd_bind_vertex_buffers(command_buffer, 0, &buffers, &offsets);
+                device.cmd_bind_index_buffer(command_buffer, buffer, buffer_index_region.offset, vk::IndexType::UINT16);
+                device.cmd_draw_indexed(command_buffer, 6, 1, 0, 0, 0);
                 device.cmd_end_render_pass(command_buffer);
             };
 
@@ -786,7 +826,9 @@ impl Renderer {
             command_pool,
             command_buffers,
             image_available_semaphores,
-            render_finished_semaphores
+            render_finished_semaphores,
+            buffer_vertex_region,
+            buffer_index_region,
         };
 
         renderer
