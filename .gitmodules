@@ -1,0 +1,3 @@
+[submodule "assets/c_src/openvr"]
+	path = assets/c_src/openvr
+	url = git@github.com:ValveSoftware/openvr.git

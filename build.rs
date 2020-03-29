@@ -2,14 +2,49 @@ extern crate shaderc;
 
 use std::error::Error;
 use shaderc::{ShaderKind};
+use std::env;
+use std::path::PathBuf;
 
-fn main() -> Result<(), Box<dyn Error>> {
-    println!("cargo:rerun-if-changed=build.rs");
-    println!("cargo:rerun-if-changed=src/shaders");
-    println!("cargo:rerun-if-changed=generated");
+fn build_vr() -> Result<(), Box<dyn Error>> {
+
+    let lib_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap()).join("assets/c_src/openvr/lib/win64");
+    let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
+
+    // Link OpenVR
+    println!("cargo:rustc-link-search=native={}", lib_dir.display());
+    println!("cargo:rustc-link-lib=openvr_api");
+
+    // Copy DLL to output dir
+    std::fs::copy(lib_dir.join("openvr_api.dll"), out_dir.join("openvr_api.dll"));
+
+    // // Generate bindings
+    // let bindings = bindgen::Builder::default()
+    //     .header("assets/c_src/openvr_wrapper.hpp")
+    //     .constified_enum(".*")
+    //     .prepend_enum_name(false)
+    //     .parse_callbacks(Box::new(bindgen::CargoCallbacks))
+    //     .generate()
+    //     .expect("Failed to generate bindings");
+
+    // // Create destination path if necessary
+    // std::fs::create_dir_all("src/vr/generated")
+    //     .unwrap();
+
+    // bindings.write_to_file("src/vr/openvr_bindings.rs")?;
+
+    Ok(())
+}
+
+fn build_shaders() -> Result<(), Box<dyn Error>> {
+    let shaders_input_dir = "assets/shaders";
+    let shaders_output_dir = "assets/shaders/generated";
+
+    // println!("cargo:rerun-if-changed=build.rs");
+    // println!("cargo:rerun-if-changed={}", shaders_input_dir);
+    // println!("cargo:rerun-if-changed={}", shaders_output_dir);
 
     // Create destination path if necessary
-    std::fs::create_dir_all("generated/shaders")?;
+    std::fs::create_dir_all(shaders_output_dir);
 
     let mut compiler = shaderc::Compiler::new()
         .expect("Failed to create compiler");
@@ -17,7 +52,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let options = shaderc::CompileOptions::new()
         .expect("Failed to create options");
 
-    for entry in std::fs::read_dir("src/shaders")? {
+    for entry in std::fs::read_dir(shaders_input_dir)? {
         let entry = entry?;
 
         if entry.file_type()?.is_file() {
@@ -42,7 +77,8 @@ fn main() -> Result<(), Box<dyn Error>> {
                     .expect("Failed to compile shader");
 
                 let out_path = format!(
-                    "generated/shaders/{}.spv",
+                    "{}/{}.spv",
+                    shaders_output_dir,
                     file_name.rsplitn(2, ".").last().unwrap()
                 );
 
@@ -50,6 +86,13 @@ fn main() -> Result<(), Box<dyn Error>> {
             }
         };
     }
+
+    Ok(())
+}
+
+fn main() -> Result<(), Box<dyn Error>> {
+    build_shaders()?;
+    build_vr()?;
 
     Ok(())
 }

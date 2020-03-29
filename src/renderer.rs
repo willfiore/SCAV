@@ -18,7 +18,7 @@ use na::{Matrix4, Vector3, Rotation3};
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 struct Vertex {
-    position: na::Vector2<f32>,
+    position: na::Vector3<f32>,
     color: na::Vector3<f32>
 }
 
@@ -37,7 +37,7 @@ impl Vertex {
             vk::VertexInputAttributeDescription::builder()
                 .binding(0)
                 .location(0)
-                .format(vk::Format::R32G32_SFLOAT)
+                .format(vk::Format::R32G32B32_SFLOAT)
                 .offset(0)
                 .build(),
 
@@ -45,7 +45,7 @@ impl Vertex {
                 .binding(0)
                 .location(1)
                 .format(vk::Format::R32G32B32_SFLOAT)
-                .offset(std::mem::size_of::<na::Vector2<f32>>() as u32)
+                .offset(std::mem::size_of::<na::Vector3<f32>>() as u32)
                 .build(),
         ]
     }
@@ -462,7 +462,7 @@ impl Renderer {
         let shader_function_entry_point = CString::new("main").unwrap();
 
         let vertex_shader_module = {
-            let mut spv_file = Cursor::new(&include_bytes!("../generated/shaders/basic.vert.spv")[..]);
+            let mut spv_file = Cursor::new(&include_bytes!("../assets/shaders/generated/basic.vert.spv")[..]);
             let code = ash::util::read_spv(&mut spv_file)
                 .expect("Failed to read vertex shader spv file");
 
@@ -474,7 +474,7 @@ impl Renderer {
         };
 
         let fragment_shader_module = {
-            let mut spv_file = Cursor::new(&include_bytes!("../generated/shaders/basic.frag.spv")[..]);
+            let mut spv_file = Cursor::new(&include_bytes!("../assets/shaders/generated/basic.frag.spv")[..]);
             let code = ash::util::read_spv(&mut spv_file)
                 .expect("Failed to read fragment shader spv file");
 
@@ -742,13 +742,51 @@ impl Renderer {
 
         // Vertices
         let vertices = [
-            Vertex { position: na::Vector2::new(-0.5,  0.5), color: na::Vector3::new(1.0, 0.0, 0.0) },
-            Vertex { position: na::Vector2::new( 0.5,  0.5), color: na::Vector3::new(1.0, 0.0, 0.0) },
-            Vertex { position: na::Vector2::new( 0.5, -0.5), color: na::Vector3::new(0.0, 1.0, 0.0) },
-            Vertex { position: na::Vector2::new(-0.5, -0.5), color: na::Vector3::new(0.0, 1.0, 0.0) },
+            // Front face
+            Vertex { position: na::Vector3::new(-1.0,  1.0,  1.0), color: na::Vector3::new(1.0, 0.0, 0.0) },
+            Vertex { position: na::Vector3::new( 1.0,  1.0,  1.0), color: na::Vector3::new(1.0, 0.0, 0.0) },
+            Vertex { position: na::Vector3::new( 1.0, -1.0,  1.0), color: na::Vector3::new(1.0, 0.0, 0.0) },
+            Vertex { position: na::Vector3::new(-1.0, -1.0,  1.0), color: na::Vector3::new(1.0, 0.0, 0.0) },
+
+            // Right face
+            Vertex { position: na::Vector3::new( 1.0,  1.0,  1.0), color: na::Vector3::new(0.0, 1.0, 0.0) },
+            Vertex { position: na::Vector3::new( 1.0,  1.0, -1.0), color: na::Vector3::new(0.0, 1.0, 0.0) },
+            Vertex { position: na::Vector3::new( 1.0, -1.0, -1.0), color: na::Vector3::new(0.0, 1.0, 0.0) },
+            Vertex { position: na::Vector3::new( 1.0, -1.0,  1.0), color: na::Vector3::new(0.0, 1.0, 0.0) },
+
+            // Left face
+            Vertex { position: na::Vector3::new(-1.0, -1.0,  1.0), color: na::Vector3::new(0.0, 0.0, 1.0) },
+            Vertex { position: na::Vector3::new(-1.0, -1.0, -1.0), color: na::Vector3::new(0.0, 0.0, 1.0) },
+            Vertex { position: na::Vector3::new(-1.0,  1.0, -1.0), color: na::Vector3::new(0.0, 0.0, 1.0) },
+            Vertex { position: na::Vector3::new(-1.0,  1.0,  1.0), color: na::Vector3::new(0.0, 0.0, 1.0) },
+
+            // Back face
+            Vertex { position: na::Vector3::new(-1.0, -1.0,  -1.0), color: na::Vector3::new(1.0, 1.0, 0.0) },
+            Vertex { position: na::Vector3::new( 1.0, -1.0,  -1.0), color: na::Vector3::new(1.0, 1.0, 0.0) },
+            Vertex { position: na::Vector3::new( 1.0,  1.0,  -1.0), color: na::Vector3::new(1.0, 1.0, 0.0) },
+            Vertex { position: na::Vector3::new(-1.0,  1.0,  -1.0), color: na::Vector3::new(1.0, 1.0, 0.0) },
+
+            // Bottom face
+            Vertex { position: na::Vector3::new(-1.0,  1.0, -1.0), color: na::Vector3::new(1.0, 0.0, 1.0) },
+            Vertex { position: na::Vector3::new( 1.0,  1.0, -1.0), color: na::Vector3::new(1.0, 0.0, 1.0) },
+            Vertex { position: na::Vector3::new( 1.0,  1.0,  1.0), color: na::Vector3::new(1.0, 0.0, 1.0) },
+            Vertex { position: na::Vector3::new(-1.0,  1.0,  1.0), color: na::Vector3::new(1.0, 0.0, 1.0) },
+
+            // Top face
+            Vertex { position: na::Vector3::new(-1.0, -1.0,  1.0), color: na::Vector3::new(0.0, 1.0, 1.0) },
+            Vertex { position: na::Vector3::new( 1.0, -1.0,  1.0), color: na::Vector3::new(0.0, 1.0, 1.0) },
+            Vertex { position: na::Vector3::new( 1.0, -1.0, -1.0), color: na::Vector3::new(0.0, 1.0, 1.0) },
+            Vertex { position: na::Vector3::new(-1.0, -1.0, -1.0), color: na::Vector3::new(0.0, 1.0, 1.0) },
         ];
 
-        let indices = [0u16, 1, 2, 2, 3, 0];
+        let indices = [
+            0u16, 1, 2, 2, 3, 0,
+               4, 5, 6, 6, 7, 4,
+               8, 9, 10, 10, 11, 8,
+               12, 13, 14, 14, 15, 12,
+               16, 17, 18, 18, 19, 16,
+               20, 21, 22, 22, 23, 20,
+        ];
 
         let vertices_size = (std::mem::size_of::<Vertex>() * vertices.len()) as u64;
         let indices_size = (std::mem::size_of::<u16>() * indices.len()) as u64;
@@ -801,7 +839,7 @@ impl Renderer {
             .to_homogeneous();
 
         let model = Matrix4::identity()
-            .append_translation(&Vector3::new(0.0, 0.0, -5.0));
+            .append_translation(&Vector3::new(3.0, 3.0, -10.0));
 
         let default_ubo = UniformBufferObject {
             model,
@@ -913,7 +951,7 @@ impl Renderer {
                 device.cmd_bind_descriptor_sets(command_buffer, vk::PipelineBindPoint::GRAPHICS, pipeline_layout, 0, &descriptor_sets, &[]);
 
                 // Drawing
-                device.cmd_draw_indexed(command_buffer, 6, 1, 0, 0, 0);
+                device.cmd_draw_indexed(command_buffer, indices.len() as u32, 1, 0, 0, 0);
 
                 device.cmd_end_render_pass(command_buffer);
             };

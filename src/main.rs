@@ -1,6 +1,7 @@
 #![windows_subsystem = "windows"]
 
 mod renderer;
+mod vr;
 
 use winit::{
     event::{Event, WindowEvent},
@@ -27,6 +28,27 @@ fn main() {
         .expect("Failed to create window");
 
     let mut renderer = Renderer::new(&window);
+
+    let vr_entry = vr::init()
+        .expect("Failed to initialise VR");
+
+    let vr_system = vr_entry.system().unwrap();
+    let vr_compositor = vr_entry.compositor().unwrap();
+
+    vr_compositor.wait_get_poses();
+
+    // let vr_entry = vr::init()
+    //     .expect("Failed to initialise VR");
+
+    // let vr_system = vr_entry.system().unwrap();
+    // let vr_compositor = vr_entry.compositor().unwrap();
+
+    // vr_compositor.wait_get_poses();
+
+    for i in 0..100 {
+        let class = vr_system.tracked_device_class(i);
+        println!("{:#?}", class);
+    }
 
     event_loop.run(move |event, _, control_flow| {
 

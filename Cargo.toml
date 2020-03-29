@@ -16,5 +16,9 @@ simple_logger = "*"
 winit = "*"
 
 [build-dependencies]
+# Shaders
 shaderc-sys = "*"
 shaderc = "*"
+
+# OpenVR building
+bindgen = "*"
