@@ -14,6 +14,7 @@ use winit::{
 };
 
 use na::{Matrix4, Vector3, Rotation3};
+use crate::vr;
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
@@ -65,20 +66,33 @@ struct UniformBufferObject {
     projection: na::Matrix4<f32>,
 }
 
+struct FramebufferState {
+    image: vk::Image,
+    image_memory: vk::DeviceMemory,
+    image_view: vk::ImageView,
+    render_pass: vk::RenderPass,
+    framebuffer: vk::Framebuffer,
+}
+
 static MAX_FRAMES_IN_FLIGHT: usize = 3;
 
 /// Vulkan renderer
 pub struct Renderer {
-    entry: ash::Entry,
     instance: ash::Instance,
     physical_device: vk::PhysicalDevice,
     device: ash::Device,
 
     surface: vk::SurfaceKHR,
     surface_loader: ash::extensions::khr::Surface,
+    surface_format: vk::SurfaceFormatKHR,
+
+    extent: vk::Extent2D,
 
     graphics_queue: vk::Queue,
+    graphics_queue_family_index: u32,
+
     present_queue: vk::Queue,
+    present_queue_family_index: u32,
 
     current_frame: usize,
 
@@ -87,6 +101,7 @@ pub struct Renderer {
 
     swapchain_loader: ash::extensions::khr::Swapchain,
     swapchain: vk::SwapchainKHR,
+    swapchain_images: Vec<vk::Image>,
 
     command_pool: vk::CommandPool,
     command_buffers: Vec<vk::CommandBuffer>,
@@ -248,8 +263,7 @@ fn upload_to_buffer<T: Copy>(device: &ash::Device, buffer_memory: vk::DeviceMemo
 }
 
 impl Renderer {
-
-    pub fn new(window: &Window) -> Self {
+    pub fn new(window: &Window, vr_context: vr::Context) -> Self {
         let entry = ash::Entry::new().unwrap();
 
         let application_name = CString::new("Game").unwrap();
@@ -259,7 +273,7 @@ impl Renderer {
             .application_version(0)
             .engine_name(&application_name)
             .engine_version(0)
-            .api_version(vk::make_version(1,0 ,0));
+            .api_version(vk::make_version(1, 0, 0));
 
         let instance_layer_names = [
             CString::new("VK_LAYER_KHRONOS_validation").unwrap(),
@@ -646,8 +660,7 @@ impl Renderer {
 
         let subpass_dependency = vk::SubpassDependency::builder()
             .src_subpass(vk::SUBPASS_EXTERNAL)
-
-        .dst_subpass(0)
+            .dst_subpass(0)
             .src_stage_mask(vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT)
             .dst_stage_mask(vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT)
             .dst_access_mask(vk::AccessFlags::COLOR_ATTACHMENT_WRITE);
@@ -679,11 +692,6 @@ impl Renderer {
         let pipeline = unsafe {
             device.create_graphics_pipelines(vk::PipelineCache::null(), &[*graphics_pipeline_create_info], None)
         }.expect("Failed to create graphics pipeline").pop().unwrap();
-
-        unsafe {
-            device.destroy_shader_module(vertex_shader_module, None);
-            device.destroy_shader_module(fragment_shader_module, None);
-        }
 
         // FRAMEBUFFERS
 
@@ -996,17 +1004,187 @@ impl Renderer {
         let in_flight_image_fences = vec![vk::Fence::null(); swapchain_images.len()];
         let current_frame: usize = 0;
 
+        //////////////
+        // VR THINGS
+        //////////////
+
+        {
+            let vr_system = vr_context.system().unwrap();
+            let recommended_render_target_size = vr_system.recommended_render_target_size();
+
+            let image_extent = vk::Extent3D {
+                width: recommended_render_target_size.0,
+                height: recommended_render_target_size.1,
+                depth: 1
+            };
+
+            let image_create_info = vk::ImageCreateInfo::builder()
+                .image_type(vk::ImageType::TYPE_2D)
+                .extent(image_extent)
+                .mip_levels(1)
+                .array_layers(1)
+                .format(vk::Format::B8G8R8A8_SRGB)
+                .tiling(vk::ImageTiling::OPTIMAL)
+                .samples(vk::SampleCountFlags::TYPE_1)
+                .usage(vk::ImageUsageFlags::SAMPLED | vk::ImageUsageFlags::TRANSFER_DST);
+
+            let image = unsafe { device.create_image(&image_create_info, None) }
+                .expect("Failed to create image for VR");
+
+            let image_memory_requirements = unsafe { device.get_image_memory_requirements(image) };
+
+            let image_memory_type_index = find_memory_type_index(image_memory_requirements.memory_type_bits,
+                                                                 vk::MemoryPropertyFlags::DEVICE_LOCAL,
+                                                                 &instance,
+                                                                 physical_device)
+                .expect("Failed to find suitable memory type index for image");
+
+            let memory_allocate_info = vk::MemoryAllocateInfo::builder()
+                .allocation_size(image_memory_requirements.size)
+                .memory_type_index(image_memory_type_index);
+
+            let image_memory = unsafe { device.allocate_memory(&memory_allocate_info, None) }
+                .expect("Failed to allocate image memory");
+
+            unsafe { device.bind_image_memory(image, image_memory, 0) }
+                .expect("Failed to bind image memory");
+
+            let image_view_create_info = vk::ImageViewCreateInfo::builder()
+                .image(image)
+                .view_type(vk::ImageViewType::TYPE_2D)
+                .format(image_create_info.format)
+                .components(vk::ComponentMapping::default())
+                .subresource_range(vk::ImageSubresourceRange {
+                    aspect_mask: vk::ImageAspectFlags::COLOR,
+                    base_mip_level: 0,
+                    level_count: 1,
+                    base_array_layer: 0,
+                    layer_count: 1
+                });
+
+            let image_view = unsafe { device.create_image_view(&image_view_create_info, None) }
+                .expect("Failed to create image view");
+
+            let image_views = [image_view];
+
+            // Specify the framebuffer attachments that will be used while rendering
+            let color_attachment = vk::AttachmentDescription::builder()
+                .format(image_create_info.format)
+                .samples(vk::SampleCountFlags::TYPE_1)
+                .load_op(vk::AttachmentLoadOp::CLEAR)
+                .store_op(vk::AttachmentStoreOp::STORE)
+                .stencil_load_op(vk::AttachmentLoadOp::DONT_CARE)
+                .stencil_store_op(vk::AttachmentStoreOp::DONT_CARE)
+                .initial_layout(vk::ImageLayout::UNDEFINED)
+                .final_layout(vk::ImageLayout::PRESENT_SRC_KHR);
+
+            // Can have multiple subpasses - subsequent render operations that depend on the
+            // content of framebuffers in previous passes, e.g. for post-processing.
+            // Subpasses reference one or more of the above attachments, using AttachmentReference objects
+            let color_attachment_ref = vk::AttachmentReference::builder()
+                .attachment(0)
+                .layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL);
+
+            let attachments = [*color_attachment];
+            let color_attachment_refs = [*color_attachment_ref];
+
+            let subpass = vk::SubpassDescription::builder()
+                .pipeline_bind_point(vk::PipelineBindPoint::GRAPHICS)
+                .color_attachments(&color_attachment_refs);
+
+            let subpasses = [*subpass];
+
+            let subpass_dependency = vk::SubpassDependency::builder()
+                .src_subpass(vk::SUBPASS_EXTERNAL)
+                .dst_subpass(0)
+                .src_stage_mask(vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT)
+                .dst_stage_mask(vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT)
+                .dst_access_mask(vk::AccessFlags::COLOR_ATTACHMENT_WRITE);
+
+            let subpass_dependencies = [*subpass_dependency];
+
+            let render_pass_create_info = vk::RenderPassCreateInfo::builder()
+                .attachments(&attachments)
+                .subpasses(&subpasses)
+                .dependencies(&subpass_dependencies);
+
+            let render_pass = unsafe { device.create_render_pass(&render_pass_create_info, None) }
+                .expect("Failed to create render pass");
+
+            // Viewport - region of the framebuffer that the output will be rendered to (scales output)
+            let viewport = vk::Viewport {
+                x: 0.0,
+                y: 0.0,
+                width: image_extent.width as f32,
+                height: image_extent.height as f32,
+                min_depth: 0.0,
+                max_depth: 1.0
+            };
+
+            // Scissor - region of the framebuffer where output is not discarded (crops output)
+            let scissor = vk::Rect2D {
+                offset: vk::Offset2D {
+                    x: 0,
+                    y: 0
+                },
+                extent
+            };
+
+            let viewports = [viewport];
+            let scissors = [scissor];
+
+            // ViewportState - combines viewports and scissors
+            let viewport_state_create_info = vk::PipelineViewportStateCreateInfo::builder()
+                .viewports(&viewports)
+                .scissors(&scissors);
+
+            let vr_framebuffer_create_info = vk::FramebufferCreateInfo::builder()
+                .width(image_extent.width)
+                .height(image_extent.height)
+                .attachments(&image_views)
+                .render_pass(render_pass)
+                .layers(1);
+
+            let graphics_pipeline_create_info = vk::GraphicsPipelineCreateInfo::builder()
+                .stages(&shader_stage_create_infos)
+                .vertex_input_state(&vertex_input_state_create_info)
+                .input_assembly_state(&input_assembly_state_create_info)
+                .viewport_state(&viewport_state_create_info)
+                .rasterization_state(&rasterization_state_create_info)
+                .multisample_state(&multisample_state_create_info)
+                .color_blend_state(&color_blend_state_create_info)
+                .layout(pipeline_layout)
+                .render_pass(render_pass)
+                .subpass(0)
+                .base_pipeline_handle(vk::Pipeline::null())
+                .base_pipeline_index(-1);
+
+            let pipeline = unsafe {
+                device.create_graphics_pipelines(vk::PipelineCache::null(), &[*graphics_pipeline_create_info], None)
+            }.expect("Failed to create graphics pipeline").pop().unwrap();
+        }
+
+        unsafe {
+            device.destroy_shader_module(vertex_shader_module, None);
+            device.destroy_shader_module(fragment_shader_module, None);
+        }
+
         let renderer = Self {
-            entry,
             instance,
             physical_device,
             device,
 
             surface,
             surface_loader,
+            surface_format,
+
+            extent,
 
             graphics_queue,
+            graphics_queue_family_index,
+
             present_queue,
+            present_queue_family_index,
 
             current_frame,
 
@@ -1015,6 +1193,7 @@ impl Renderer {
 
             swapchain_loader,
             swapchain,
+            swapchain_images,
 
             command_pool,
             command_buffers,
@@ -1104,6 +1283,33 @@ impl Renderer {
             .wait_semaphores(&signal_semaphores)
             .swapchains(&swapchains)
             .image_indices(&image_indices);
+
+        // Submit to VR
+
+        // let poses = self.vr_context.compositor.wait_get_poses();
+
+        let texture = vr::VulkanTextureData {
+            image: image_index as u64,
+            device: self.device.handle(),
+            physical_device: self.physical_device,
+            instance: self.instance.handle(),
+            queue: self.present_queue,
+            queue_family_index: self.present_queue_family_index,
+            width: 3687,
+            height: 4096,
+            format: self.surface_format.format.as_raw() as u32,
+            sample_count: 1
+        };
+
+        let bounds = vr::TextureBounds {
+            u_min: 0.0,
+            u_max: 1.0,
+            v_min: 0.0,
+            v_max: 1.0
+        };
+
+        // self.vr_context.compositor.submit(vr::Eye::Left, &texture, &bounds);
+        // self.vr_context.compositor.submit(vr::Eye::Right, &texture, &bounds);
 
         unsafe {
             self.swapchain_loader.queue_present(self.present_queue, &present_info)

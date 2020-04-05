@@ -4,80 +4,65 @@
 #![allow(dead_code)]
 
 mod openvr_bindings;
-use openvr_bindings::*;
+use openvr_bindings as sys;
 
-pub struct System(&'static VR_IVRSystem_FnTable);
-pub struct Compositor(&'static VR_IVRCompositor_FnTable);
+pub mod defines;
+pub use defines::*;
 
 pub mod system;
+pub use system::*;
 
-impl Compositor {
-    pub fn wait_get_poses(&self) {
-        unsafe {
-            let x = self.0.WaitGetPoses.unwrap();
+pub mod compositor;
+pub use compositor::*;
 
-            let y = "Hello";
+use nalgebra as na;
+use na::{Vector3, Vector4, Matrix3x4};
 
-            let x = Vec::from(y);
+pub struct System(&'static sys::VR_IVRSystem_FnTable);
+pub struct Compositor(&'static sys::VR_IVRCompositor_FnTable);
 
-            let mut poses: [TrackedDevicePose_t; 16 as usize]
-                = std::mem::MaybeUninit::uninit().assume_init();
+#[derive(Copy, Clone)]
+pub struct Context;
 
-            self.0.WaitGetPoses.unwrap()(
-                poses.as_mut_ptr(), k_unMaxTrackedDeviceCount, std::ptr::null_mut(), 0
-            );
-        }
-    }
-}
-
-pub struct Entry {}
-
-impl Entry {
+impl Context {
     pub fn system(&self) -> Result<System, InitError> {
-        load_fn_table(IVRSystem_Version).map(|t| unsafe { System(&*t) })
+        get_fn_table(sys::IVRSystem_Version).map(|t| unsafe { System(&*t) })
     }
 
     pub fn compositor(&self) -> Result<Compositor, InitError> {
-        load_fn_table(IVRCompositor_Version).map(|t| unsafe { Compositor(&*t) })
+        get_fn_table(sys::IVRCompositor_Version).map(|t| unsafe { Compositor(&*t) })
     }
 }
 
-
-#[derive(Debug)]
-pub enum InitError {
-    HmdNotFound,
-    Other(i32),
-}
-
-fn load_fn_table<T>(version: &[u8]) -> Result<*const T, InitError> {
+fn get_fn_table<T>(version: &[u8]) -> Result<*const T, InitError> {
     let mut version_str = Vec::from(b"FnTable:".as_ref());
     version_str.extend(version);
     let version_str = version_str.as_ptr() as *const i8;
 
-    let mut error = EVRInitError_VRInitError_None;
-    let ptr = unsafe { VR_GetGenericInterface(version_str, &mut error) };
+    let mut error = sys::EVRInitError_VRInitError_None;
+    let ptr = unsafe { sys::VR_GetGenericInterface(version_str, &mut error) };
 
-    if error != EVRInitError_VRInitError_None {
+    if error != sys::EVRInitError_VRInitError_None {
         return Err(InitError::Other(error));
     }
 
     Ok(ptr as *const T)
 }
 
-pub fn init() -> Result<Entry, InitError> {
+pub fn init() -> Result<Context, InitError> {
 
-    let mut error: EVRInitError = 0;
+    let mut error: sys::EVRInitError = 0;
 
     unsafe {
-        VR_InitInternal(&mut error, EVRApplicationType_VRApplication_Other);
+        sys::VR_InitInternal(&mut error, sys::EVRApplicationType_VRApplication_Scene);
 
         if error != 0 {
             return Err(match error {
-                EVRInitError_VRInitError_Init_HmdNotFound => InitError::HmdNotFound,
+                sys::EVRInitError_VRInitError_Init_HmdNotFound => InitError::HmdNotFound,
                 _ => InitError::Other(error),
             })
         }
     }
 
-    Ok(Entry {})
+    Ok(Context{})
 }

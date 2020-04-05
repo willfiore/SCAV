@@ -14,6 +14,7 @@ use log::{error, warn, info, debug, trace};
 
 use winit::dpi::LogicalSize;
 use crate::renderer::Renderer;
+use crate::vr::TrackedDevicePropertyString;
 
 fn main() {
     simple_logger::init().expect("Failed to initialise logger");
@@ -27,28 +28,10 @@ fn main() {
         .build(&event_loop)
         .expect("Failed to create window");
 
-    let mut renderer = Renderer::new(&window);
-
-    let vr_entry = vr::init()
+    let vr_context = vr::init()
         .expect("Failed to initialise VR");
 
-    let vr_system = vr_entry.system().unwrap();
-    let vr_compositor = vr_entry.compositor().unwrap();
-
-    vr_compositor.wait_get_poses();
-
-    // let vr_entry = vr::init()
-    //     .expect("Failed to initialise VR");
-
-    // let vr_system = vr_entry.system().unwrap();
-    // let vr_compositor = vr_entry.compositor().unwrap();
-
-    // vr_compositor.wait_get_poses();
-
-    for i in 0..100 {
-        let class = vr_system.tracked_device_class(i);
-        println!("{:#?}", class);
-    }
+    let mut renderer = Renderer::new(&window, vr_context);
 
     event_loop.run(move |event, _, control_flow| {
 
