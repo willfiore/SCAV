@@ -5,35 +5,35 @@ use shaderc::{ShaderKind};
 use std::env;
 use std::path::PathBuf;
 
-fn build_vr() -> Result<(), Box<dyn Error>> {
-
-    let lib_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap()).join("assets/c_src/openvr/lib/win64");
-    let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
-
-    // Link OpenVR
-    println!("cargo:rustc-link-search=native={}", lib_dir.display());
-    println!("cargo:rustc-link-lib=openvr_api");
-
-    // Copy DLL to output dir
-    std::fs::copy(lib_dir.join("openvr_api.dll"), out_dir.join("openvr_api.dll"));
-
-    // // Generate bindings
-    // let bindings = bindgen::Builder::default()
-    //     .header("assets/c_src/openvr_wrapper.hpp")
-    //     .constified_enum(".*")
-    //     .prepend_enum_name(false)
-    //     .parse_callbacks(Box::new(bindgen::CargoCallbacks))
-    //     .generate()
-    //     .expect("Failed to generate bindings");
-
-    // // Create destination path if necessary
-    // std::fs::create_dir_all("src/vr/generated")
-    //     .unwrap();
-
-    // bindings.write_to_file("src/vr/openvr_bindings.rs")?;
-
-    Ok(())
-}
+// fn build_vr() -> Result<(), Box<dyn Error>> {
+//
+//     let lib_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap()).join("assets/c_src/openvr/lib/win64");
+//     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
+//
+//     // Link OpenVR
+//     println!("cargo:rustc-link-search=native={}", lib_dir.display());
+//     println!("cargo:rustc-link-lib=openvr_api");
+//
+//     // Copy DLL to output dir
+//     std::fs::copy(lib_dir.join("openvr_api.dll"), out_dir.join("openvr_api.dll"));
+//
+//     // // Generate bindings
+//     // let bindings = bindgen::Builder::default()
+//     //     .header("assets/c_src/openvr_wrapper.hpp")
+//     //     .constified_enum(".*")
+//     //     .prepend_enum_name(false)
+//     //     .parse_callbacks(Box::new(bindgen::CargoCallbacks))
+//     //     .generate()
+//     //     .expect("Failed to generate bindings");
+//
+//     // // Create destination path if necessary
+//     // std::fs::create_dir_all("src/vr/generated")
+//     //     .unwrap();
+//
+//     // bindings.write_to_file("src/vr/openvr_bindings.rs")?;
+//
+//     Ok(())
+// }
 
 fn build_shaders() -> Result<(), Box<dyn Error>> {
     let shaders_input_dir = "assets/shaders";
@@ -92,7 +92,7 @@ fn build_shaders() -> Result<(), Box<dyn Error>> {
 
 fn main() -> Result<(), Box<dyn Error>> {
     build_shaders()?;
-    build_vr()?;
+    // build_vr()?;
 
     Ok(())
 }

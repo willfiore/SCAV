@@ -4,6 +4,7 @@ extern crate ash;
 use ash::vk as vk;
 use ash::extensions::khr;
 use ash::util::Align;
+use ash::vk::Handle;
 use std::ffi::{CString, c_void};
 use ash::version::{EntryV1_0, InstanceV1_0, DeviceV1_0};
 use std::io::Cursor;
@@ -13,8 +14,25 @@ use winit::{
     platform::windows::WindowExtWindows,
 };
 
-use na::{Matrix4, Vector3, Rotation3};
-use crate::vr;
+use na::{Matrix4, Point3, Vector3, Rotation3};
+use nalgebra::Isometry3;
+
+pub struct Camera {
+    pub position: Point3<f32>,
+
+    pub yaw: f32,
+    pub pitch: f32,
+}
+
+impl Camera {
+    pub fn new() -> Camera {
+        Camera {
+            position: Point3::origin(),
+            yaw: 0.0,
+            pitch: 0.0
+        }
+    }
+}
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
@@ -113,7 +131,17 @@ pub struct Renderer {
     static_geometry_buffer_vertex_region: BufferRegion,
     static_geometry_buffer_index_region: BufferRegion,
 
+    pipeline_layout: vk::PipelineLayout,
+    pipeline: vk::Pipeline,
+
+    render_pass: vk::RenderPass,
+    framebuffers: Vec<vk::Framebuffer>,
+
+    descriptor_sets: Vec<vk::DescriptorSet>,
     uniform_buffer: vk::Buffer,
+    uniform_buffer_memory: vk::DeviceMemory,
+
+    // TEMP,
 }
 
 fn extension_names() -> Vec<*const i8> {
@@ -144,13 +172,164 @@ fn find_memory_type_index(type_filter: u32, properties: vk::MemoryPropertyFlags,
     return Err(());
 }
 
+fn create_framebuffer_state(extent: vk::Extent2D,
+                            instance: &ash::Instance,
+                            device: &ash::Device,
+                            physical_device: vk::PhysicalDevice) -> Result<FramebufferState, ()> {
+
+    let extent_3d = vk::Extent3D {
+        width: extent.width,
+        height: extent.height,
+        depth: 1
+    };
+
+    let image_create_info = vk::ImageCreateInfo::builder()
+        .image_type(vk::ImageType::TYPE_2D)
+        .extent(extent_3d)
+        .mip_levels(1)
+        .array_layers(1)
+        .format(vk::Format::B8G8R8A8_SRGB)
+        .tiling(vk::ImageTiling::OPTIMAL)
+        .samples(vk::SampleCountFlags::TYPE_1)
+        .usage(vk::ImageUsageFlags::SAMPLED | vk::ImageUsageFlags::TRANSFER_DST | vk::ImageUsageFlags::COLOR_ATTACHMENT);
+
+    let image = unsafe { device.create_image(&image_create_info, None) }
+        .map_err(|e|())?;
+
+    let image_memory_requirements = unsafe { device.get_image_memory_requirements(image) };
+
+    let image_memory_type_index = find_memory_type_index(image_memory_requirements.memory_type_bits,
+                                                         vk::MemoryPropertyFlags::DEVICE_LOCAL,
+                                                         &instance,
+                                                         physical_device)
+        .map_err(|e|())?;
+
+    let memory_allocate_info = vk::MemoryAllocateInfo::builder()
+        .allocation_size(image_memory_requirements.size)
+        .memory_type_index(image_memory_type_index);
+
+    let image_memory = unsafe { device.allocate_memory(&memory_allocate_info, None) }
+        .map_err(|e|())?;
+
+    unsafe { device.bind_image_memory(image, image_memory, 0) }
+        .map_err(|e|())?;
+
+    let image_view_create_info = vk::ImageViewCreateInfo::builder()
+        .image(image)
+        .view_type(vk::ImageViewType::TYPE_2D)
+        .format(image_create_info.format)
+        .components(vk::ComponentMapping::default())
+        .subresource_range(vk::ImageSubresourceRange {
+            aspect_mask: vk::ImageAspectFlags::COLOR,
+            base_mip_level: 0,
+            level_count: 1,
+            base_array_layer: 0,
+            layer_count: 1
+        });
+
+    let image_view = unsafe { device.create_image_view(&image_view_create_info, None) }
+        .map_err(|e|())?;
+
+    let image_views = [image_view];
+
+    // Specify the framebuffer attachments that will be used while rendering
+    let color_attachment = vk::AttachmentDescription::builder()
+        .format(image_create_info.format)
+        .samples(vk::SampleCountFlags::TYPE_1)
+        .load_op(vk::AttachmentLoadOp::CLEAR)
+        .store_op(vk::AttachmentStoreOp::STORE)
+        .stencil_load_op(vk::AttachmentLoadOp::DONT_CARE)
+        .stencil_store_op(vk::AttachmentStoreOp::DONT_CARE)
+        .initial_layout(vk::ImageLayout::UNDEFINED)
+        .final_layout(vk::ImageLayout::PRESENT_SRC_KHR);
+
+    // Can have multiple subpasses - subsequent render operations that depend on the
+    // content of framebuffers in previous passes, e.g. for post-processing.
+    // Subpasses reference one or more of the above attachments, using AttachmentReference objects
+    let color_attachment_ref = vk::AttachmentReference::builder()
+        .attachment(0)
+        .layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL);
+
+    let attachments = [*color_attachment];
+    let color_attachment_refs = [*color_attachment_ref];
+
+    let subpass = vk::SubpassDescription::builder()
+        .pipeline_bind_point(vk::PipelineBindPoint::GRAPHICS)
+        .color_attachments(&color_attachment_refs);
+
+    let subpasses = [*subpass];
+
+    let subpass_dependency = vk::SubpassDependency::builder()
+        .src_subpass(vk::SUBPASS_EXTERNAL)
+        .dst_subpass(0)
+        .src_stage_mask(vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT)
+        .dst_stage_mask(vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT)
+        .dst_access_mask(vk::AccessFlags::COLOR_ATTACHMENT_WRITE);
+
+    let subpass_dependencies = [*subpass_dependency];
+
+    let render_pass_create_info = vk::RenderPassCreateInfo::builder()
+        .attachments(&attachments)
+        .subpasses(&subpasses)
+        .dependencies(&subpass_dependencies);
+
+    let render_pass = unsafe { device.create_render_pass(&render_pass_create_info, None) }
+        .map_err(|e|())?;
+
+    // Viewport - region of the framebuffer that the output will be rendered to (scales output)
+    let viewport = vk::Viewport {
+        x: 0.0,
+        y: 0.0,
+        width: extent.width as f32,
+        height: extent.height as f32,
+        min_depth: 0.0,
+        max_depth: 1.0
+    };
+
+    // Scissor - region of the framebuffer where output is not discarded (crops output)
+    let scissor = vk::Rect2D {
+        offset: vk::Offset2D {
+            x: 0,
+            y: 0
+        },
+        extent
+    };
+
+    let viewports = [viewport];
+    let scissors = [scissor];
+
+    // ViewportState - combines viewports and scissors
+    let viewport_state_create_info = vk::PipelineViewportStateCreateInfo::builder()
+        .viewports(&viewports)
+        .scissors(&scissors);
+
+    // FRAME BUFFER
+    let framebuffer_create_info = vk::FramebufferCreateInfo::builder()
+        .width(extent.width)
+        .height(extent.height)
+        .attachments(&image_views)
+        .render_pass(render_pass)
+        .layers(1);
+
+    let framebuffer = unsafe { device.create_framebuffer(&framebuffer_create_info, None) }
+        .map_err(|e|())?;
+
+    Ok(FramebufferState {
+        image,
+        image_memory,
+        image_view,
+        render_pass,
+        framebuffer,
+    })
+}
+
 fn create_buffer(instance: &ash::Instance,
                  device: &ash::Device,
                  physical_device: vk::PhysicalDevice,
                  size: vk::DeviceSize,
                  usage_flags: vk::BufferUsageFlags,
                  memory_property_flags: vk::MemoryPropertyFlags)
-    -> Result<(vk::Buffer, vk::DeviceMemory), ()>
+                 -> Result<(vk::Buffer, vk::DeviceMemory), ()>
 {
 
     // Create buffer
@@ -263,7 +442,7 @@ fn upload_to_buffer<T: Copy>(device: &ash::Device, buffer_memory: vk::DeviceMemo
 }
 
 impl Renderer {
-    pub fn new(window: &Window, vr_context: vr::Context) -> Self {
+    pub fn new(window: &Window) -> Self {
         let entry = ash::Entry::new().unwrap();
 
         let application_name = CString::new("Game").unwrap();
@@ -719,7 +898,7 @@ impl Renderer {
 
         let command_pool_create_info = vk::CommandPoolCreateInfo::builder()
             .queue_family_index(graphics_queue_family_index)
-            .flags(vk::CommandPoolCreateFlags::TRANSIENT);
+            .flags(vk::CommandPoolCreateFlags::TRANSIENT | vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER);
 
         let command_pool = unsafe { device.create_command_pool(&command_pool_create_info, None) }
             .expect("Failed to create command pool");
@@ -750,41 +929,41 @@ impl Renderer {
 
         // Vertices
         let vertices = [
-            // Front face
-            Vertex { position: na::Vector3::new(-1.0,  1.0,  1.0), color: na::Vector3::new(1.0, 0.0, 0.0) },
-            Vertex { position: na::Vector3::new( 1.0,  1.0,  1.0), color: na::Vector3::new(1.0, 0.0, 0.0) },
-            Vertex { position: na::Vector3::new( 1.0, -1.0,  1.0), color: na::Vector3::new(1.0, 0.0, 0.0) },
-            Vertex { position: na::Vector3::new(-1.0, -1.0,  1.0), color: na::Vector3::new(1.0, 0.0, 0.0) },
+            // Back face
+            Vertex { position: na::Vector3::new(-0.5,  0.5,  0.5), color: na::Vector3::new(1.0, 0.0, 0.0) },
+            Vertex { position: na::Vector3::new( 0.5,  0.5,  0.5), color: na::Vector3::new(1.0, 0.0, 0.0) },
+            Vertex { position: na::Vector3::new( 0.5, -0.5,  0.5), color: na::Vector3::new(1.0, 0.0, 0.0) },
+            Vertex { position: na::Vector3::new(-0.5, -0.5,  0.5), color: na::Vector3::new(1.0, 0.0, 0.0) },
 
             // Right face
-            Vertex { position: na::Vector3::new( 1.0,  1.0,  1.0), color: na::Vector3::new(0.0, 1.0, 0.0) },
-            Vertex { position: na::Vector3::new( 1.0,  1.0, -1.0), color: na::Vector3::new(0.0, 1.0, 0.0) },
-            Vertex { position: na::Vector3::new( 1.0, -1.0, -1.0), color: na::Vector3::new(0.0, 1.0, 0.0) },
-            Vertex { position: na::Vector3::new( 1.0, -1.0,  1.0), color: na::Vector3::new(0.0, 1.0, 0.0) },
+            Vertex { position: na::Vector3::new( 0.5,  0.5,  0.5), color: na::Vector3::new(0.0, 1.0, 0.0) },
+            Vertex { position: na::Vector3::new( 0.5,  0.5, -0.5), color: na::Vector3::new(0.0, 1.0, 0.0) },
+            Vertex { position: na::Vector3::new( 0.5, -0.5, -0.5), color: na::Vector3::new(0.0, 1.0, 0.0) },
+            Vertex { position: na::Vector3::new( 0.5, -0.5,  0.5), color: na::Vector3::new(0.0, 1.0, 0.0) },
 
             // Left face
-            Vertex { position: na::Vector3::new(-1.0, -1.0,  1.0), color: na::Vector3::new(0.0, 0.0, 1.0) },
-            Vertex { position: na::Vector3::new(-1.0, -1.0, -1.0), color: na::Vector3::new(0.0, 0.0, 1.0) },
-            Vertex { position: na::Vector3::new(-1.0,  1.0, -1.0), color: na::Vector3::new(0.0, 0.0, 1.0) },
-            Vertex { position: na::Vector3::new(-1.0,  1.0,  1.0), color: na::Vector3::new(0.0, 0.0, 1.0) },
+            Vertex { position: na::Vector3::new(-0.5, -0.5,  0.5), color: na::Vector3::new(0.0, 0.0, 1.0) },
+            Vertex { position: na::Vector3::new(-0.5, -0.5, -0.5), color: na::Vector3::new(0.0, 0.0, 1.0) },
+            Vertex { position: na::Vector3::new(-0.5,  0.5, -0.5), color: na::Vector3::new(0.0, 0.0, 1.0) },
+            Vertex { position: na::Vector3::new(-0.5,  0.5,  0.5), color: na::Vector3::new(0.0, 0.0, 1.0) },
 
-            // Back face
-            Vertex { position: na::Vector3::new(-1.0, -1.0,  -1.0), color: na::Vector3::new(1.0, 1.0, 0.0) },
-            Vertex { position: na::Vector3::new( 1.0, -1.0,  -1.0), color: na::Vector3::new(1.0, 1.0, 0.0) },
-            Vertex { position: na::Vector3::new( 1.0,  1.0,  -1.0), color: na::Vector3::new(1.0, 1.0, 0.0) },
-            Vertex { position: na::Vector3::new(-1.0,  1.0,  -1.0), color: na::Vector3::new(1.0, 1.0, 0.0) },
+            // Front face
+            Vertex { position: na::Vector3::new(-0.5, -0.5,  -0.5), color: na::Vector3::new(1.0, 1.0, 0.0) },
+            Vertex { position: na::Vector3::new( 0.5, -0.5,  -0.5), color: na::Vector3::new(1.0, 1.0, 0.0) },
+            Vertex { position: na::Vector3::new( 0.5,  0.5,  -0.5), color: na::Vector3::new(1.0, 1.0, 0.0) },
+            Vertex { position: na::Vector3::new(-0.5,  0.5,  -0.5), color: na::Vector3::new(1.0, 1.0, 0.0) },
 
             // Bottom face
-            Vertex { position: na::Vector3::new(-1.0,  1.0, -1.0), color: na::Vector3::new(1.0, 0.0, 1.0) },
-            Vertex { position: na::Vector3::new( 1.0,  1.0, -1.0), color: na::Vector3::new(1.0, 0.0, 1.0) },
-            Vertex { position: na::Vector3::new( 1.0,  1.0,  1.0), color: na::Vector3::new(1.0, 0.0, 1.0) },
-            Vertex { position: na::Vector3::new(-1.0,  1.0,  1.0), color: na::Vector3::new(1.0, 0.0, 1.0) },
+            Vertex { position: na::Vector3::new(-0.5,  0.5, -0.5), color: na::Vector3::new(1.0, 0.0, 1.0) },
+            Vertex { position: na::Vector3::new( 0.5,  0.5, -0.5), color: na::Vector3::new(1.0, 0.0, 1.0) },
+            Vertex { position: na::Vector3::new( 0.5,  0.5,  0.5), color: na::Vector3::new(1.0, 0.0, 1.0) },
+            Vertex { position: na::Vector3::new(-0.5,  0.5,  0.5), color: na::Vector3::new(1.0, 0.0, 1.0) },
 
             // Top face
-            Vertex { position: na::Vector3::new(-1.0, -1.0,  1.0), color: na::Vector3::new(0.0, 1.0, 1.0) },
-            Vertex { position: na::Vector3::new( 1.0, -1.0,  1.0), color: na::Vector3::new(0.0, 1.0, 1.0) },
-            Vertex { position: na::Vector3::new( 1.0, -1.0, -1.0), color: na::Vector3::new(0.0, 1.0, 1.0) },
-            Vertex { position: na::Vector3::new(-1.0, -1.0, -1.0), color: na::Vector3::new(0.0, 1.0, 1.0) },
+            Vertex { position: na::Vector3::new(-0.5, -0.5,  0.5), color: na::Vector3::new(0.0, 1.0, 1.0) },
+            Vertex { position: na::Vector3::new( 0.5, -0.5,  0.5), color: na::Vector3::new(0.0, 1.0, 1.0) },
+            Vertex { position: na::Vector3::new( 0.5, -0.5, -0.5), color: na::Vector3::new(0.0, 1.0, 1.0) },
+            Vertex { position: na::Vector3::new(-0.5, -0.5, -0.5), color: na::Vector3::new(0.0, 1.0, 1.0) },
         ];
 
         let indices = [
@@ -846,12 +1025,15 @@ impl Renderer {
         let projection = na::geometry::Perspective3::new(aspect_ratio, 0.78, 0.1, 10.0)
             .to_homogeneous();
 
+        let view = Matrix4::identity()
+            .append_translation(&Vector3::new(0.2, 0.2, 0.2));
+
         let model = Matrix4::identity()
             .append_translation(&Vector3::new(3.0, 3.0, -10.0));
 
         let default_ubo = UniformBufferObject {
             model,
-            view: Matrix4::identity(),
+            view,
             projection
         };
 
@@ -919,55 +1101,6 @@ impl Renderer {
         let command_buffers = unsafe { device.allocate_command_buffers(&command_buffer_allocate_info) }
             .expect("Failed to allocate command buffers");
 
-        command_buffers.iter().enumerate().for_each(|(i, &command_buffer)| {
-            let begin_info = vk::CommandBufferBeginInfo::builder();
-
-            unsafe { device.begin_command_buffer(command_buffer, &begin_info) }
-                .expect("Failed to begin comomand buffer");
-
-            let clear_value = vk::ClearValue {
-                color: vk::ClearColorValue { float32: [ 0.0, 0.0, 0.0, 1.0 ] }
-            };
-
-            let clear_values = [clear_value];
-
-            let render_pass_begin_info = vk::RenderPassBeginInfo::builder()
-                .render_pass(render_pass)
-                .framebuffer(framebuffers[i])
-                .render_area(vk::Rect2D {
-                    offset: vk::Offset2D {
-                        x: 0,
-                        y: 0
-                    },
-                    extent
-                })
-                .clear_values(&clear_values);
-
-            // Render pass
-            unsafe {
-                device.cmd_begin_render_pass(command_buffer, &render_pass_begin_info, vk::SubpassContents::INLINE);
-                device.cmd_bind_pipeline(command_buffer, vk::PipelineBindPoint::GRAPHICS, pipeline);
-
-                let buffers = [static_geometry_buffer];
-                let offsets = [0];
-
-                // Bindings
-                device.cmd_bind_vertex_buffers(command_buffer, 0, &buffers, &offsets);
-                device.cmd_bind_index_buffer(command_buffer, static_geometry_buffer, static_geometry_buffer_index_region.offset, vk::IndexType::UINT16);
-
-                let descriptor_sets = [descriptor_sets[i]];
-                device.cmd_bind_descriptor_sets(command_buffer, vk::PipelineBindPoint::GRAPHICS, pipeline_layout, 0, &descriptor_sets, &[]);
-
-                // Drawing
-                device.cmd_draw_indexed(command_buffer, indices.len() as u32, 1, 0, 0, 0);
-
-                device.cmd_end_render_pass(command_buffer);
-            };
-
-            unsafe { device.end_command_buffer(command_buffer) }
-                .expect("Failed to end command buffer");
-        });
-
         // SEMAPHORES AND FENCES
 
         // Semaphores are sync primitives internal to the GPU, they handle synchronization
@@ -1003,166 +1136,6 @@ impl Renderer {
 
         let in_flight_image_fences = vec![vk::Fence::null(); swapchain_images.len()];
         let current_frame: usize = 0;
-
-        //////////////
-        // VR THINGS
-        //////////////
-
-        {
-            let vr_system = vr_context.system().unwrap();
-            let recommended_render_target_size = vr_system.recommended_render_target_size();
-
-            let image_extent = vk::Extent3D {
-                width: recommended_render_target_size.0,
-                height: recommended_render_target_size.1,
-                depth: 1
-            };
-
-            let image_create_info = vk::ImageCreateInfo::builder()
-                .image_type(vk::ImageType::TYPE_2D)
-                .extent(image_extent)
-                .mip_levels(1)
-                .array_layers(1)
-                .format(vk::Format::B8G8R8A8_SRGB)
-                .tiling(vk::ImageTiling::OPTIMAL)
-                .samples(vk::SampleCountFlags::TYPE_1)
-                .usage(vk::ImageUsageFlags::SAMPLED | vk::ImageUsageFlags::TRANSFER_DST);
-
-            let image = unsafe { device.create_image(&image_create_info, None) }
-                .expect("Failed to create image for VR");
-
-            let image_memory_requirements = unsafe { device.get_image_memory_requirements(image) };
-
-            let image_memory_type_index = find_memory_type_index(image_memory_requirements.memory_type_bits,
-                                                                 vk::MemoryPropertyFlags::DEVICE_LOCAL,
-                                                                 &instance,
-                                                                 physical_device)
-                .expect("Failed to find suitable memory type index for image");
-
-            let memory_allocate_info = vk::MemoryAllocateInfo::builder()
-                .allocation_size(image_memory_requirements.size)
-                .memory_type_index(image_memory_type_index);
-
-            let image_memory = unsafe { device.allocate_memory(&memory_allocate_info, None) }
-                .expect("Failed to allocate image memory");
-
-            unsafe { device.bind_image_memory(image, image_memory, 0) }
-                .expect("Failed to bind image memory");
-
-            let image_view_create_info = vk::ImageViewCreateInfo::builder()
-                .image(image)
-                .view_type(vk::ImageViewType::TYPE_2D)
-                .format(image_create_info.format)
-                .components(vk::ComponentMapping::default())
-                .subresource_range(vk::ImageSubresourceRange {
-                    aspect_mask: vk::ImageAspectFlags::COLOR,
-                    base_mip_level: 0,
-                    level_count: 1,
-                    base_array_layer: 0,
-                    layer_count: 1
-                });
-
-            let image_view = unsafe { device.create_image_view(&image_view_create_info, None) }
-                .expect("Failed to create image view");
-
-            let image_views = [image_view];
-
-            // Specify the framebuffer attachments that will be used while rendering
-            let color_attachment = vk::AttachmentDescription::builder()
-                .format(image_create_info.format)
-                .samples(vk::SampleCountFlags::TYPE_1)
-                .load_op(vk::AttachmentLoadOp::CLEAR)
-                .store_op(vk::AttachmentStoreOp::STORE)
-                .stencil_load_op(vk::AttachmentLoadOp::DONT_CARE)
-                .stencil_store_op(vk::AttachmentStoreOp::DONT_CARE)
-                .initial_layout(vk::ImageLayout::UNDEFINED)
-                .final_layout(vk::ImageLayout::PRESENT_SRC_KHR);
-
-            // Can have multiple subpasses - subsequent render operations that depend on the
-            // content of framebuffers in previous passes, e.g. for post-processing.
-            // Subpasses reference one or more of the above attachments, using AttachmentReference objects
-            let color_attachment_ref = vk::AttachmentReference::builder()
-                .attachment(0)
-                .layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL);
-
-            let attachments = [*color_attachment];
-            let color_attachment_refs = [*color_attachment_ref];
-
-            let subpass = vk::SubpassDescription::builder()
-                .pipeline_bind_point(vk::PipelineBindPoint::GRAPHICS)
-                .color_attachments(&color_attachment_refs);
-
-            let subpasses = [*subpass];
-
-            let subpass_dependency = vk::SubpassDependency::builder()
-                .src_subpass(vk::SUBPASS_EXTERNAL)
-                .dst_subpass(0)
-                .src_stage_mask(vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT)
-                .dst_stage_mask(vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT)
-                .dst_access_mask(vk::AccessFlags::COLOR_ATTACHMENT_WRITE);
-
-            let subpass_dependencies = [*subpass_dependency];
-
-            let render_pass_create_info = vk::RenderPassCreateInfo::builder()
-                .attachments(&attachments)
-                .subpasses(&subpasses)
-                .dependencies(&subpass_dependencies);
-
-            let render_pass = unsafe { device.create_render_pass(&render_pass_create_info, None) }
-                .expect("Failed to create render pass");
-
-            // Viewport - region of the framebuffer that the output will be rendered to (scales output)
-            let viewport = vk::Viewport {
-                x: 0.0,
-                y: 0.0,
-                width: image_extent.width as f32,
-                height: image_extent.height as f32,
-                min_depth: 0.0,
-                max_depth: 1.0
-            };
-
-            // Scissor - region of the framebuffer where output is not discarded (crops output)
-            let scissor = vk::Rect2D {
-                offset: vk::Offset2D {
-                    x: 0,
-                    y: 0
-                },
-                extent
-            };
-
-            let viewports = [viewport];
-            let scissors = [scissor];
-
-            // ViewportState - combines viewports and scissors
-            let viewport_state_create_info = vk::PipelineViewportStateCreateInfo::builder()
-                .viewports(&viewports)
-                .scissors(&scissors);
-
-            let vr_framebuffer_create_info = vk::FramebufferCreateInfo::builder()
-                .width(image_extent.width)
-                .height(image_extent.height)
-                .attachments(&image_views)
-                .render_pass(render_pass)
-                .layers(1);
-
-            let graphics_pipeline_create_info = vk::GraphicsPipelineCreateInfo::builder()
-                .stages(&shader_stage_create_infos)
-                .vertex_input_state(&vertex_input_state_create_info)
-                .input_assembly_state(&input_assembly_state_create_info)
-                .viewport_state(&viewport_state_create_info)
-                .rasterization_state(&rasterization_state_create_info)
-                .multisample_state(&multisample_state_create_info)
-                .color_blend_state(&color_blend_state_create_info)
-                .layout(pipeline_layout)
-                .render_pass(render_pass)
-                .subpass(0)
-                .base_pipeline_handle(vk::Pipeline::null())
-                .base_pipeline_index(-1);
-
-            let pipeline = unsafe {
-                device.create_graphics_pipelines(vk::PipelineCache::null(), &[*graphics_pipeline_create_info], None)
-            }.expect("Failed to create graphics pipeline").pop().unwrap();
-        }
 
         unsafe {
             device.destroy_shader_module(vertex_shader_module, None);
@@ -1201,17 +1174,24 @@ impl Renderer {
             image_available_semaphores,
             render_finished_semaphores,
 
+            pipeline_layout,
+            pipeline,
+
             static_geometry_buffer,
             static_geometry_buffer_vertex_region,
             static_geometry_buffer_index_region,
 
+            render_pass,
+            framebuffers,
+            descriptor_sets,
             uniform_buffer,
+            uniform_buffer_memory,
         };
 
         renderer
     }
 
-    pub fn draw_frame(&mut self) {
+    pub fn draw_frame(&mut self, camera: &Camera) {
         self.current_frame = (self.current_frame + 1) % MAX_FRAMES_IN_FLIGHT;
 
         // Ensure that there are no more than MAX_FRAMES_IN_FLIGHT frames
@@ -1253,12 +1233,93 @@ impl Renderer {
         // Mark this swapchain image as now being used by this frame
         self.in_flight_image_fences[image_index] = self.in_flight_frame_fences[self.current_frame];
 
+        // Record command buffer for frame
+
+        let command_buffer = self.command_buffers[image_index];
+
+        unsafe {
+            let begin_info = vk::CommandBufferBeginInfo::builder();
+
+            self.device.begin_command_buffer(command_buffer, &begin_info)
+                .expect("Failed to begin comomand buffer");
+
+            let clear_value = vk::ClearValue {
+                color: vk::ClearColorValue { float32: [ 0.0, 0.0, 0.0, 1.0 ] }
+            };
+
+            let clear_values = [clear_value];
+
+            let render_pass_begin_info = vk::RenderPassBeginInfo::builder()
+                .render_pass(self.render_pass)
+                .framebuffer(self.framebuffers[image_index])
+                .render_area(vk::Rect2D {
+                    offset: vk::Offset2D {
+                        x: 0,
+                        y: 0
+                    },
+                    extent: self.extent
+                })
+                .clear_values(&clear_values);
+
+            // Render pass
+            self.device.cmd_begin_render_pass(command_buffer, &render_pass_begin_info, vk::SubpassContents::INLINE);
+            self.device.cmd_bind_pipeline(command_buffer, vk::PipelineBindPoint::GRAPHICS, self.pipeline);
+
+            let buffers = [self.static_geometry_buffer];
+            let offsets = [0];
+
+            // Bindings
+            self.device.cmd_bind_vertex_buffers(command_buffer, 0, &buffers, &offsets);
+            self.device.cmd_bind_index_buffer(command_buffer, self.static_geometry_buffer, self.static_geometry_buffer_index_region.offset, vk::IndexType::UINT16);
+
+            let descriptor_sets = [self.descriptor_sets[image_index]];
+            self.device.cmd_bind_descriptor_sets(command_buffer, vk::PipelineBindPoint::GRAPHICS, self.pipeline_layout, 0, &descriptor_sets, &[]);
+
+            // Drawing
+            self.device.cmd_draw_indexed(command_buffer, 36, 1, 0, 0, 0);
+
+            self.device.cmd_end_render_pass(command_buffer);
+
+            self.device.end_command_buffer(command_buffer)
+                .expect("Failed to end command buffer");
+        };
+
+        // Update uniform buffer for frame
+        let aspect_ratio = (self.extent.width as f32) / (self.extent.height as f32);
+
+        let projection = na::geometry::Perspective3::new(aspect_ratio, 1.0, 0.1, 100.0)
+            .to_homogeneous();
+
+        let view = {
+
+            let eye = &camera.position;
+            let target = &Point3::new(camera.position[0], camera.position[1], camera.position[2] + 1.0);
+            let up = &-Vector3::y();
+
+            let translation = Matrix4::look_at_rh(eye, target, up);
+
+            let rotation_yaw   = Matrix4::from_euler_angles(0.0, camera.yaw, 0.0);
+            let rotation_pitch = Matrix4::from_euler_angles(-camera.pitch, 0.0, 0.0);
+
+            rotation_pitch * rotation_yaw * translation
+        };
+
+        let model = Matrix4::identity();
+
+        let ubo = UniformBufferObject {
+            model,
+            view,
+            projection
+        };
+
+        let memory_offset = image_index * std::mem::size_of::<UniformBufferObject>();
+
+        upload_to_buffer(&self.device, self.uniform_buffer_memory, memory_offset as u64, std::slice::from_ref(&ubo));
+
         let wait_semaphores = [self.image_available_semaphores[self.current_frame]];
         let wait_stages = [vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT];
-
         let signal_semaphores = [self.render_finished_semaphores[self.current_frame]];
-
-        let current_command_buffers = [self.command_buffers[image_index]];
+        let current_command_buffers = [command_buffer];
 
         let submit_info = vk::SubmitInfo::builder()
             .command_buffers(&current_command_buffers)
@@ -1283,33 +1344,6 @@ impl Renderer {
             .wait_semaphores(&signal_semaphores)
             .swapchains(&swapchains)
             .image_indices(&image_indices);
-
-        // Submit to VR
-
-        // let poses = self.vr_context.compositor.wait_get_poses();
-
-        let texture = vr::VulkanTextureData {
-            image: image_index as u64,
-            device: self.device.handle(),
-            physical_device: self.physical_device,
-            instance: self.instance.handle(),
-            queue: self.present_queue,
-            queue_family_index: self.present_queue_family_index,
-            width: 3687,
-            height: 4096,
-            format: self.surface_format.format.as_raw() as u32,
-            sample_count: 1
-        };
-
-        let bounds = vr::TextureBounds {
-            u_min: 0.0,
-            u_max: 1.0,
-            v_min: 0.0,
-            v_max: 1.0
-        };
-
-        // self.vr_context.compositor.submit(vr::Eye::Left, &texture, &bounds);
-        // self.vr_context.compositor.submit(vr::Eye::Right, &texture, &bounds);
 
         unsafe {
             self.swapchain_loader.queue_present(self.present_queue, &present_info)
