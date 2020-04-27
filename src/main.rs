@@ -23,7 +23,7 @@ use crate::input::Input;
 use na::{Point3, Matrix4, Rotation3};
 use std::f32::consts::PI;
 
-const LOGIC_TICK_DURATION: Duration = Duration::from_millis(6);
+const LOGIC_TICK_DURATION: Duration = Duration::from_millis(20);
 const PLAYER_SPEED: f32 = 5.0;
 const CAMERA_MOUSE_SENSITIVITY: f32 = 0.001;
 
