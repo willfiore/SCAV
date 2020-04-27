@@ -82,7 +82,7 @@ fn main() {
     let event_loop = EventLoop::new();
 
     let window = WindowBuilder::new()
-        .with_title("Game")
+        .with_title("SCAV")
         .with_inner_size(LogicalSize { width: 1280, height: 720 })
         .with_resizable(false)
         .build(&event_loop)
