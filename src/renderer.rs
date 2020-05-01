@@ -2,10 +2,8 @@ extern crate nalgebra as na;
 extern crate ash;
 
 use ash::vk as vk;
-use ash::extensions::khr;
 use ash::util::Align;
-use ash::vk::Handle;
-use std::ffi::{CString, c_void};
+use std::ffi::{CString};
 use ash::version::{EntryV1_0, InstanceV1_0, DeviceV1_0};
 use std::io::Cursor;
 
@@ -14,8 +12,10 @@ use winit::{
     platform::windows::WindowExtWindows,
 };
 
-use na::{Matrix4, Point3, Vector3, Rotation3};
-use nalgebra::Isometry3;
+use na::{Matrix4, Point3, Vector3};
+use std::collections::{HashMap, BTreeMap};
+use nalgebra::Vector4;
+use std::cmp::Ordering;
 
 pub struct Camera {
     pub position: Point3<f32>,
@@ -36,9 +36,9 @@ impl Camera {
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
-struct Vertex {
-    position: na::Vector3<f32>,
-    color: na::Vector3<f32>
+pub struct Vertex {
+    pub position: Vector3<f32>,
+    pub color: Vector3<f32>
 }
 
 impl Vertex {
@@ -70,6 +70,88 @@ impl Vertex {
     }
 }
 
+#[repr(C)]
+#[derive(Debug, Clone)]
+struct InstanceData {
+    transform: Matrix4<f32>,
+}
+
+impl InstanceData {
+    fn binding_description() -> vk::VertexInputBindingDescription {
+        let binding_description = vk::VertexInputBindingDescription::builder()
+            .binding(1)
+            .stride(std::mem::size_of::<Self>() as u32)
+            .input_rate(vk::VertexInputRate::INSTANCE);
+
+        *binding_description
+    }
+
+    // Matrix as a vertex attribute takes up 4 locations, one for each row
+    fn attribute_descriptions() -> [vk::VertexInputAttributeDescription; 4] {
+        [
+            vk::VertexInputAttributeDescription::builder()
+                .binding(1)
+                .location(2)
+                .format(vk::Format::R32G32B32A32_SFLOAT)
+                .offset(0)
+                .build(),
+
+            vk::VertexInputAttributeDescription::builder()
+                .binding(1)
+                .location(3)
+                .format(vk::Format::R32G32B32A32_SFLOAT)
+                .offset(std::mem::size_of::<Vector4<f32>>() as u32)
+                .build(),
+
+            vk::VertexInputAttributeDescription::builder()
+                .binding(1)
+                .location(4)
+                .format(vk::Format::R32G32B32A32_SFLOAT)
+                .offset(2 * std::mem::size_of::<Vector4<f32>>() as u32)
+                .build(),
+
+            vk::VertexInputAttributeDescription::builder()
+                .binding(1)
+                .location(5)
+                .format(vk::Format::R32G32B32A32_SFLOAT)
+                .offset(3 * std::mem::size_of::<Vector4<f32>>() as u32)
+                .build(),
+        ]
+    }
+}
+
+// MODEL
+
+#[derive(Debug, Clone, Copy, Hash, Ord, PartialOrd, PartialEq, Eq)]
+pub struct ModelId(u32);
+
+#[derive(Debug)]
+struct ModelDescriptor {
+    model_id: ModelId,
+
+    num_vertices: usize,
+    num_indices: usize,
+
+    vertex_offset: usize, // offset in num vertices since beginning of geometry buffer
+    index_offset: usize,  // offset in num indices since beginning of geometry buffer
+}
+
+struct ModelDrawCommand {
+    model_id: ModelId,
+    transform: Matrix4::<f32>,
+}
+
+enum DrawCommand {
+    Model(ModelDrawCommand)
+}
+
+pub type ModelIndex = u32;
+
+pub struct Model {
+    pub vertices: Vec<Vertex>,
+    pub indices: Vec<ModelIndex>,
+}
+
 #[derive(Debug, Clone, Copy)]
 struct BufferRegion {
     offset: vk::DeviceSize,
@@ -79,23 +161,15 @@ struct BufferRegion {
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 struct UniformBufferObject {
-    model: na::Matrix4<f32>,
-    view: na::Matrix4<f32>,
-    projection: na::Matrix4<f32>,
-}
-
-struct FramebufferState {
-    image: vk::Image,
-    image_memory: vk::DeviceMemory,
-    image_view: vk::ImageView,
-    render_pass: vk::RenderPass,
-    framebuffer: vk::Framebuffer,
+    proj_view_model: Matrix4<f32>,
 }
 
 static MAX_FRAMES_IN_FLIGHT: usize = 3;
 
 /// Vulkan renderer
 pub struct Renderer {
+
+    // VULKAN STATE
     instance: ash::Instance,
     physical_device: vk::PhysicalDevice,
     device: ash::Device,
@@ -122,14 +196,11 @@ pub struct Renderer {
     swapchain_images: Vec<vk::Image>,
 
     command_pool: vk::CommandPool,
-    command_buffers: Vec<vk::CommandBuffer>,
+    swapchain_command_buffers: Vec<vk::CommandBuffer>,
+    upload_command_buffer: vk::CommandBuffer,
 
     image_available_semaphores: Vec<vk::Semaphore>,
     render_finished_semaphores: Vec<vk::Semaphore>,
-
-    static_geometry_buffer: vk::Buffer,
-    static_geometry_buffer_vertex_region: BufferRegion,
-    static_geometry_buffer_index_region: BufferRegion,
 
     pipeline_layout: vk::PipelineLayout,
     pipeline: vk::Pipeline,
@@ -138,10 +209,30 @@ pub struct Renderer {
     framebuffers: Vec<vk::Framebuffer>,
 
     descriptor_sets: Vec<vk::DescriptorSet>,
-    uniform_buffer: vk::Buffer,
-    uniform_buffer_memory: vk::DeviceMemory,
 
-    // TEMP,
+    uniform_buffer: GpuBuffer,
+    staging_buffer: GpuBuffer,
+
+    geometry_buffer: GpuBuffer,
+    geometry_buffer_indices_offset:  usize,
+    geometry_buffer_num_vertices: usize,
+    geometry_buffer_num_indices: usize,
+
+    model_instance_data_buffer: GpuBuffer, // Stores transform matrices per instance
+
+    model_descriptors: HashMap<ModelId, ModelDescriptor>,
+    next_model_id: ModelId,
+
+    queued_draw_commands: Vec<DrawCommand>,
+
+    // Frame state
+    is_frame_writing: bool,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct GpuBuffer {
+    buffer: vk::Buffer,
+    memory: vk::DeviceMemory,
 }
 
 fn extension_names() -> Vec<*const i8> {
@@ -172,225 +263,65 @@ fn find_memory_type_index(type_filter: u32, properties: vk::MemoryPropertyFlags,
     return Err(());
 }
 
-fn create_framebuffer_state(extent: vk::Extent2D,
-                            instance: &ash::Instance,
-                            device: &ash::Device,
-                            physical_device: vk::PhysicalDevice) -> Result<FramebufferState, ()> {
-
-    let extent_3d = vk::Extent3D {
-        width: extent.width,
-        height: extent.height,
-        depth: 1
-    };
-
-    let image_create_info = vk::ImageCreateInfo::builder()
-        .image_type(vk::ImageType::TYPE_2D)
-        .extent(extent_3d)
-        .mip_levels(1)
-        .array_layers(1)
-        .format(vk::Format::B8G8R8A8_SRGB)
-        .tiling(vk::ImageTiling::OPTIMAL)
-        .samples(vk::SampleCountFlags::TYPE_1)
-        .usage(vk::ImageUsageFlags::SAMPLED | vk::ImageUsageFlags::TRANSFER_DST | vk::ImageUsageFlags::COLOR_ATTACHMENT);
-
-    let image = unsafe { device.create_image(&image_create_info, None) }
-        .map_err(|e|())?;
-
-    let image_memory_requirements = unsafe { device.get_image_memory_requirements(image) };
-
-    let image_memory_type_index = find_memory_type_index(image_memory_requirements.memory_type_bits,
-                                                         vk::MemoryPropertyFlags::DEVICE_LOCAL,
-                                                         &instance,
-                                                         physical_device)
-        .map_err(|e|())?;
-
-    let memory_allocate_info = vk::MemoryAllocateInfo::builder()
-        .allocation_size(image_memory_requirements.size)
-        .memory_type_index(image_memory_type_index);
-
-    let image_memory = unsafe { device.allocate_memory(&memory_allocate_info, None) }
-        .map_err(|e|())?;
-
-    unsafe { device.bind_image_memory(image, image_memory, 0) }
-        .map_err(|e|())?;
-
-    let image_view_create_info = vk::ImageViewCreateInfo::builder()
-        .image(image)
-        .view_type(vk::ImageViewType::TYPE_2D)
-        .format(image_create_info.format)
-        .components(vk::ComponentMapping::default())
-        .subresource_range(vk::ImageSubresourceRange {
-            aspect_mask: vk::ImageAspectFlags::COLOR,
-            base_mip_level: 0,
-            level_count: 1,
-            base_array_layer: 0,
-            layer_count: 1
-        });
-
-    let image_view = unsafe { device.create_image_view(&image_view_create_info, None) }
-        .map_err(|e|())?;
-
-    let image_views = [image_view];
-
-    // Specify the framebuffer attachments that will be used while rendering
-    let color_attachment = vk::AttachmentDescription::builder()
-        .format(image_create_info.format)
-        .samples(vk::SampleCountFlags::TYPE_1)
-        .load_op(vk::AttachmentLoadOp::CLEAR)
-        .store_op(vk::AttachmentStoreOp::STORE)
-        .stencil_load_op(vk::AttachmentLoadOp::DONT_CARE)
-        .stencil_store_op(vk::AttachmentStoreOp::DONT_CARE)
-        .initial_layout(vk::ImageLayout::UNDEFINED)
-        .final_layout(vk::ImageLayout::PRESENT_SRC_KHR);
-
-    // Can have multiple subpasses - subsequent render operations that depend on the
-    // content of framebuffers in previous passes, e.g. for post-processing.
-    // Subpasses reference one or more of the above attachments, using AttachmentReference objects
-    let color_attachment_ref = vk::AttachmentReference::builder()
-        .attachment(0)
-        .layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL);
-
-    let attachments = [*color_attachment];
-    let color_attachment_refs = [*color_attachment_ref];
-
-    let subpass = vk::SubpassDescription::builder()
-        .pipeline_bind_point(vk::PipelineBindPoint::GRAPHICS)
-        .color_attachments(&color_attachment_refs);
-
-    let subpasses = [*subpass];
-
-    let subpass_dependency = vk::SubpassDependency::builder()
-        .src_subpass(vk::SUBPASS_EXTERNAL)
-        .dst_subpass(0)
-        .src_stage_mask(vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT)
-        .dst_stage_mask(vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT)
-        .dst_access_mask(vk::AccessFlags::COLOR_ATTACHMENT_WRITE);
-
-    let subpass_dependencies = [*subpass_dependency];
-
-    let render_pass_create_info = vk::RenderPassCreateInfo::builder()
-        .attachments(&attachments)
-        .subpasses(&subpasses)
-        .dependencies(&subpass_dependencies);
-
-    let render_pass = unsafe { device.create_render_pass(&render_pass_create_info, None) }
-        .map_err(|e|())?;
-
-    // Viewport - region of the framebuffer that the output will be rendered to (scales output)
-    let viewport = vk::Viewport {
-        x: 0.0,
-        y: 0.0,
-        width: extent.width as f32,
-        height: extent.height as f32,
-        min_depth: 0.0,
-        max_depth: 1.0
-    };
-
-    // Scissor - region of the framebuffer where output is not discarded (crops output)
-    let scissor = vk::Rect2D {
-        offset: vk::Offset2D {
-            x: 0,
-            y: 0
-        },
-        extent
-    };
-
-    let viewports = [viewport];
-    let scissors = [scissor];
-
-    // ViewportState - combines viewports and scissors
-    let viewport_state_create_info = vk::PipelineViewportStateCreateInfo::builder()
-        .viewports(&viewports)
-        .scissors(&scissors);
-
-    // FRAME BUFFER
-    let framebuffer_create_info = vk::FramebufferCreateInfo::builder()
-        .width(extent.width)
-        .height(extent.height)
-        .attachments(&image_views)
-        .render_pass(render_pass)
-        .layers(1);
-
-    let framebuffer = unsafe { device.create_framebuffer(&framebuffer_create_info, None) }
-        .map_err(|e|())?;
-
-    Ok(FramebufferState {
-        image,
-        image_memory,
-        image_view,
-        render_pass,
-        framebuffer,
-    })
-}
-
 fn create_buffer(instance: &ash::Instance,
                  device: &ash::Device,
                  physical_device: vk::PhysicalDevice,
                  size: vk::DeviceSize,
                  usage_flags: vk::BufferUsageFlags,
                  memory_property_flags: vk::MemoryPropertyFlags)
-                 -> Result<(vk::Buffer, vk::DeviceMemory), ()>
+                 -> Result<GpuBuffer, ()>
 {
 
     // Create buffer
-    let vertex_buffer_create_info = vk::BufferCreateInfo::builder()
+    let buffer_create_info = vk::BufferCreateInfo::builder()
         .size(size)
         .usage(usage_flags)
         .sharing_mode(vk::SharingMode::EXCLUSIVE);
 
-    let vertex_buffer = unsafe {
-        device.create_buffer(&vertex_buffer_create_info, None)
-            .map_err(|e|())?
+    let buffer = unsafe {
+        device.create_buffer(&buffer_create_info, None)
+            .map_err(|_|())?
     };
 
     // Allocate memory
-    let vertex_buffer_memory_requirements = unsafe { device.get_buffer_memory_requirements(vertex_buffer) };
+    let buffer_memory_requirements = unsafe { device.get_buffer_memory_requirements(buffer) };
 
     let memory_type_index = find_memory_type_index(
-        vertex_buffer_memory_requirements.memory_type_bits,
-        vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
+        buffer_memory_requirements.memory_type_bits,
+        memory_property_flags,
         &instance,
         physical_device
     )?;
 
-    let vertex_buffer_memory_allocate_info = vk::MemoryAllocateInfo::builder()
-        .allocation_size(vertex_buffer_memory_requirements.size)
+    let buffer_memory_allocate_info = vk::MemoryAllocateInfo::builder()
+        .allocation_size(buffer_memory_requirements.size)
         .memory_type_index(memory_type_index);
 
-    let vertex_buffer_memory = unsafe {
-        device.allocate_memory(&vertex_buffer_memory_allocate_info, None)
-            .map_err(|e|())?
+    let memory = unsafe {
+        device.allocate_memory(&buffer_memory_allocate_info, None)
+            .map_err(|_|())?
     };
 
     // Bind memory to buffer
     unsafe {
-        device.bind_buffer_memory(vertex_buffer, vertex_buffer_memory, 0)
-            .map_err(|e|())?
+        device.bind_buffer_memory(buffer, memory, 0)
+            .map_err(|_|())?
     };
 
-    Ok((vertex_buffer, vertex_buffer_memory))
+    Ok( GpuBuffer { buffer, memory } )
 }
 
-fn copy_buffer(src_buffer: vk::Buffer,
-               dst_buffer: vk::Buffer,
+fn copy_buffer(src_buffer: GpuBuffer,
+               dst_buffer: GpuBuffer,
                size: vk::DeviceSize,
                src_offset: vk::DeviceSize,
                dst_offset: vk::DeviceSize,
-               command_pool: vk::CommandPool,
                device: &ash::Device,
+               command_buffer: vk::CommandBuffer,
                submit_queue: vk::Queue)
     -> Result<(), ()>
 {
     unsafe {
-        let allocate_info = vk::CommandBufferAllocateInfo::builder()
-            .level(vk::CommandBufferLevel::PRIMARY)
-            .command_pool(command_pool)
-            .command_buffer_count(1);
-
-        let command_buffer = device.allocate_command_buffers(&allocate_info)
-            .map_err(|e|())?
-            .pop().ok_or(())?;
-
         let command_buffer_begin_info = vk::CommandBufferBeginInfo::builder()
             .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
 
@@ -402,7 +333,7 @@ fn copy_buffer(src_buffer: vk::Buffer,
         let regions = [*buffer_copy];
 
         device.begin_command_buffer(command_buffer, &command_buffer_begin_info);
-        device.cmd_copy_buffer(command_buffer, src_buffer, dst_buffer, &regions);
+        device.cmd_copy_buffer(command_buffer, src_buffer.buffer, dst_buffer.buffer, &regions);
         device.end_command_buffer(command_buffer);
 
         let command_buffers = [command_buffer];
@@ -414,34 +345,34 @@ fn copy_buffer(src_buffer: vk::Buffer,
 
         device.queue_submit(submit_queue, &submit_infos, vk::Fence::null());
         device.queue_wait_idle(submit_queue);
-
-        device.free_command_buffers(command_pool, &command_buffers);
     }
 
     Ok(())
 }
 
-fn upload_to_buffer<T: Copy>(device: &ash::Device, buffer_memory: vk::DeviceMemory, offset: vk::DeviceSize, slice: &[T])
+fn upload_to_buffer<T: Copy>(device: &ash::Device, buffer: GpuBuffer, offset: vk::DeviceSize, slice: &[T])
     -> Result<(), ()>
 {
+
     let align = std::mem::align_of::<T>() as u64;
     let size = (slice.len() * std::mem::size_of::<T>()) as u64;
 
     unsafe {
         let memory_ptr =
-            device.map_memory(buffer_memory, offset, size, vk::MemoryMapFlags::empty())
-                .map_err(|e|())?;
+            device.map_memory(buffer.memory, offset, size, vk::MemoryMapFlags::empty())
+                .map_err(|_|())?;
 
         let mut vk_align = Align::new(memory_ptr, align, size);
         vk_align.copy_from_slice(slice);
 
-        device.unmap_memory(buffer_memory);
+        device.unmap_memory(buffer.memory);
     }
 
     Ok(())
 }
 
 impl Renderer {
+
     pub fn new(window: &Window) -> Self {
         let entry = ash::Entry::new().unwrap();
 
@@ -483,7 +414,6 @@ impl Renderer {
                 .expect("Failed to enumerate physical devices");
 
             // TODO: Ensure physical device supports extensions
-
             physical_devices.pop()
         }.expect("Failed to find a physical device with Vulkan support");
 
@@ -691,8 +621,8 @@ impl Renderer {
         let shader_stage_create_infos = [*vertex_shader_stage_create_info, *fragment_shader_stage_create_info];
 
         // Vertex bindings
-        let vertex_binding_descriptions = [Vertex::binding_description()];
-        let vertex_attribute_descriptions = Vertex::attribute_descriptions();
+        let vertex_binding_descriptions = [Vertex::binding_description(), InstanceData::binding_description()];
+        let vertex_attribute_descriptions = [&Vertex::attribute_descriptions()[..], &InstanceData::attribute_descriptions()[..]].concat();
 
         // VertexInputState - Format of vertex data passed to vertex shader
         let vertex_input_state_create_info = vk::PipelineVertexInputStateCreateInfo::builder()
@@ -905,119 +835,53 @@ impl Renderer {
 
         // BUFFERS
 
-        // Static geometry buffer - store vertices and indices
-        let static_geometry_buffer_vertex_region =
-            BufferRegion {
-                offset: 0,
-                size: 10 * 1024 * 1024
-            };
-
-        let static_geometry_buffer_index_region =
-            BufferRegion {
-                offset: static_geometry_buffer_vertex_region.size,
-                size: 10 * 1024 * 1024
-            };
-
         // Static geometry should live on device local memory (since we don't have to change it after
         // upload). To get it there, we need to use a host coherent intermediate staging buffer,
         // and then copy that data over using a command buffer.
 
-        let staging_buffer_size = 20 * 1024 * 1024;
+        let staging_buffer_max_size: usize = 10 * 1024 * 1024;
 
-        let static_geometry_buffer_size =
-            static_geometry_buffer_vertex_region.size + static_geometry_buffer_index_region.size;
-
-        // Vertices
-        let vertices = [
-            // Back face
-            Vertex { position: na::Vector3::new(-0.5,  0.5,  0.5), color: na::Vector3::new(1.0, 0.0, 0.0) },
-            Vertex { position: na::Vector3::new( 0.5,  0.5,  0.5), color: na::Vector3::new(1.0, 0.0, 0.0) },
-            Vertex { position: na::Vector3::new( 0.5, -0.5,  0.5), color: na::Vector3::new(1.0, 0.0, 0.0) },
-            Vertex { position: na::Vector3::new(-0.5, -0.5,  0.5), color: na::Vector3::new(1.0, 0.0, 0.0) },
-
-            // Right face
-            Vertex { position: na::Vector3::new( 0.5,  0.5,  0.5), color: na::Vector3::new(0.0, 1.0, 0.0) },
-            Vertex { position: na::Vector3::new( 0.5,  0.5, -0.5), color: na::Vector3::new(0.0, 1.0, 0.0) },
-            Vertex { position: na::Vector3::new( 0.5, -0.5, -0.5), color: na::Vector3::new(0.0, 1.0, 0.0) },
-            Vertex { position: na::Vector3::new( 0.5, -0.5,  0.5), color: na::Vector3::new(0.0, 1.0, 0.0) },
-
-            // Left face
-            Vertex { position: na::Vector3::new(-0.5, -0.5,  0.5), color: na::Vector3::new(0.0, 0.0, 1.0) },
-            Vertex { position: na::Vector3::new(-0.5, -0.5, -0.5), color: na::Vector3::new(0.0, 0.0, 1.0) },
-            Vertex { position: na::Vector3::new(-0.5,  0.5, -0.5), color: na::Vector3::new(0.0, 0.0, 1.0) },
-            Vertex { position: na::Vector3::new(-0.5,  0.5,  0.5), color: na::Vector3::new(0.0, 0.0, 1.0) },
-
-            // Front face
-            Vertex { position: na::Vector3::new(-0.5, -0.5,  -0.5), color: na::Vector3::new(1.0, 1.0, 0.0) },
-            Vertex { position: na::Vector3::new( 0.5, -0.5,  -0.5), color: na::Vector3::new(1.0, 1.0, 0.0) },
-            Vertex { position: na::Vector3::new( 0.5,  0.5,  -0.5), color: na::Vector3::new(1.0, 1.0, 0.0) },
-            Vertex { position: na::Vector3::new(-0.5,  0.5,  -0.5), color: na::Vector3::new(1.0, 1.0, 0.0) },
-
-            // Bottom face
-            Vertex { position: na::Vector3::new(-0.5,  0.5, -0.5), color: na::Vector3::new(1.0, 0.0, 1.0) },
-            Vertex { position: na::Vector3::new( 0.5,  0.5, -0.5), color: na::Vector3::new(1.0, 0.0, 1.0) },
-            Vertex { position: na::Vector3::new( 0.5,  0.5,  0.5), color: na::Vector3::new(1.0, 0.0, 1.0) },
-            Vertex { position: na::Vector3::new(-0.5,  0.5,  0.5), color: na::Vector3::new(1.0, 0.0, 1.0) },
-
-            // Top face
-            Vertex { position: na::Vector3::new(-0.5, -0.5,  0.5), color: na::Vector3::new(0.0, 1.0, 1.0) },
-            Vertex { position: na::Vector3::new( 0.5, -0.5,  0.5), color: na::Vector3::new(0.0, 1.0, 1.0) },
-            Vertex { position: na::Vector3::new( 0.5, -0.5, -0.5), color: na::Vector3::new(0.0, 1.0, 1.0) },
-            Vertex { position: na::Vector3::new(-0.5, -0.5, -0.5), color: na::Vector3::new(0.0, 1.0, 1.0) },
-        ];
-
-        let indices = [
-            0u16, 1, 2, 2, 3, 0,
-               4, 5, 6, 6, 7, 4,
-               8, 9, 10, 10, 11, 8,
-               12, 13, 14, 14, 15, 12,
-               16, 17, 18, 18, 19, 16,
-               20, 21, 22, 22, 23, 20,
-        ];
-
-        let vertices_size = (std::mem::size_of::<Vertex>() * vertices.len()) as u64;
-        let indices_size = (std::mem::size_of::<u16>() * indices.len()) as u64;
-
-        let (staging_buffer, staging_buffer_memory) = create_buffer(
+        let staging_buffer = create_buffer(
             &instance, &device, physical_device,
-            staging_buffer_size,
+            staging_buffer_max_size as u64,
             vk::BufferUsageFlags::TRANSFER_SRC,
             vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
         ).expect("Failed to create staging buffer");
 
-        let (static_geometry_buffer, static_geometry_buffer_memory) = create_buffer(
+        let geometry_buffer_vertices_max_size : usize = 10 * 1024 * 1024;
+        let geometry_buffer_indices_max_size  : usize = 10 * 1024 * 1024;
+        let geometry_buffer_max_size          : usize = geometry_buffer_vertices_max_size + geometry_buffer_indices_max_size;
+
+        let geometry_buffer_indices_offset: usize = geometry_buffer_vertices_max_size;
+
+        let geometry_buffer = create_buffer(
             &instance, &device, physical_device,
-            static_geometry_buffer_size,
+            geometry_buffer_max_size as u64,
             vk::BufferUsageFlags::TRANSFER_DST |
                 vk::BufferUsageFlags::VERTEX_BUFFER |
-                vk::BufferUsageFlags::INDEX_BUFFER |
-                vk::BufferUsageFlags::UNIFORM_BUFFER,
-            vk::MemoryPropertyFlags::DEVICE_LOCAL,
+                vk::BufferUsageFlags::INDEX_BUFFER,
+            vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
         ).expect("Failed to create vertex buffer");
 
-        // Fill memory
-        upload_to_buffer(&device, staging_buffer_memory, 0, &vertices)
-            .expect("Failed to upload vertices to staging buffer");
+        let model_instance_data_buffer_max_size: usize = 10 * 1024 * 1024;
 
-        copy_buffer(staging_buffer, static_geometry_buffer, vertices_size, 0, 0, command_pool, &device, graphics_queue)
-            .expect("Failed to copy vertices to static buffer");
-
-        upload_to_buffer(&device, staging_buffer_memory, 0, &indices)
-            .expect("Failed to upload indices to staging buffer");
-
-        copy_buffer(staging_buffer, static_geometry_buffer, indices_size, 0,
-                    static_geometry_buffer_index_region.offset, command_pool, &device, graphics_queue)
-            .expect("Failed to copy indices to static buffer");
+        let model_instance_data_buffer = create_buffer(
+            &instance, &device, physical_device,
+            model_instance_data_buffer_max_size as u64,
+            vk::BufferUsageFlags::TRANSFER_DST |
+                vk::BufferUsageFlags::VERTEX_BUFFER,
+            vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
+        ).expect("Failed to create vertex buffer");
 
         // Uniform buffer
 
         let uniform_buffer_size = (std::mem::size_of::<UniformBufferObject>() * swapchain_images.len()) as u64;
 
-        let (uniform_buffer, uniform_buffer_memory) = create_buffer(
+        let uniform_buffer = create_buffer(
             &instance, &device, physical_device,
             uniform_buffer_size,
             vk::BufferUsageFlags::UNIFORM_BUFFER,
-            vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT
+            vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
         ).expect("Failed to create uniform buffer");
 
         let aspect_ratio = (extent.width as f32) / (extent.height as f32);
@@ -1032,13 +896,11 @@ impl Renderer {
             .append_translation(&Vector3::new(3.0, 3.0, -10.0));
 
         let default_ubo = UniformBufferObject {
-            model,
-            view,
-            projection
+            proj_view_model: projection * view * model
         };
 
         let default_ubos = vec![default_ubo; swapchain_images.len()];
-        upload_to_buffer(&device, uniform_buffer_memory, 0, &default_ubos);
+        upload_to_buffer(&device, uniform_buffer, 0, &default_ubos);
 
         // DESCRIPTOR SETS
 
@@ -1073,7 +935,7 @@ impl Renderer {
             let offset = i * range;
 
             let buffer_info = vk::DescriptorBufferInfo::builder()
-                .buffer(uniform_buffer)
+                .buffer(uniform_buffer.buffer)
                 .offset(offset as u64)
                 .range(range as u64);
 
@@ -1093,13 +955,22 @@ impl Renderer {
 
         // COMMAND BUFFERS
 
-        let command_buffer_allocate_info = vk::CommandBufferAllocateInfo::builder()
+        let swapchain_command_buffer_allocate_info = vk::CommandBufferAllocateInfo::builder()
             .command_pool(command_pool)
             .level(vk::CommandBufferLevel::PRIMARY)
             .command_buffer_count(framebuffers.len() as u32);
 
-        let command_buffers = unsafe { device.allocate_command_buffers(&command_buffer_allocate_info) }
-            .expect("Failed to allocate command buffers");
+        let upload_command_buffer_allocate_info = vk::CommandBufferAllocateInfo::builder()
+            .command_pool(command_pool)
+            .level(vk::CommandBufferLevel::PRIMARY)
+            .command_buffer_count(1);
+
+        let swapchain_command_buffers = unsafe { device.allocate_command_buffers(&swapchain_command_buffer_allocate_info) }
+            .expect("Failed to allocate swapchain command buffers");
+
+        let upload_command_buffer = unsafe { device.allocate_command_buffers(&upload_command_buffer_allocate_info) }
+            .expect("Failed to allocate upload command buffer")
+            .pop().unwrap();
 
         // SEMAPHORES AND FENCES
 
@@ -1169,7 +1040,8 @@ impl Renderer {
             swapchain_images,
 
             command_pool,
-            command_buffers,
+            swapchain_command_buffers,
+            upload_command_buffer,
 
             image_available_semaphores,
             render_finished_semaphores,
@@ -1177,21 +1049,44 @@ impl Renderer {
             pipeline_layout,
             pipeline,
 
-            static_geometry_buffer,
-            static_geometry_buffer_vertex_region,
-            static_geometry_buffer_index_region,
-
             render_pass,
             framebuffers,
             descriptor_sets,
+
             uniform_buffer,
-            uniform_buffer_memory,
+            staging_buffer,
+
+            geometry_buffer,
+            geometry_buffer_indices_offset,
+            geometry_buffer_num_vertices: 0,
+            geometry_buffer_num_indices: 0,
+
+            model_instance_data_buffer,
+
+            model_descriptors: HashMap::new(),
+            next_model_id: ModelId(0),
+
+            queued_draw_commands: Vec::new(),
+
+            //
+
+            is_frame_writing: false
         };
 
         renderer
     }
 
-    pub fn draw_frame(&mut self, camera: &Camera) {
+    pub fn begin_frame(&mut self) {
+        assert!(!self.is_frame_writing, "begin_frame called again before draw_frame");
+        self.is_frame_writing = true;
+
+        self.queued_draw_commands.clear();
+    }
+
+    pub fn end_frame(&mut self, camera: &Camera) {
+        assert!(self.is_frame_writing, "Can't draw frame when frame hasn't begun - did you call begin_frame?");
+        self.is_frame_writing = false;
+
         self.current_frame = (self.current_frame + 1) % MAX_FRAMES_IN_FLIGHT;
 
         // Ensure that there are no more than MAX_FRAMES_IN_FLIGHT frames
@@ -1235,7 +1130,7 @@ impl Renderer {
 
         // Record command buffer for frame
 
-        let command_buffer = self.command_buffers[image_index];
+        let command_buffer = self.swapchain_command_buffers[image_index];
 
         unsafe {
             let begin_info = vk::CommandBufferBeginInfo::builder();
@@ -1265,21 +1160,57 @@ impl Renderer {
             self.device.cmd_begin_render_pass(command_buffer, &render_pass_begin_info, vk::SubpassContents::INLINE);
             self.device.cmd_bind_pipeline(command_buffer, vk::PipelineBindPoint::GRAPHICS, self.pipeline);
 
-            let buffers = [self.static_geometry_buffer];
-            let offsets = [0];
+            let mut model_transforms_map: BTreeMap<ModelId, Vec<Matrix4<f32>>> = BTreeMap::new();
 
-            // Bindings
-            self.device.cmd_bind_vertex_buffers(command_buffer, 0, &buffers, &offsets);
-            self.device.cmd_bind_index_buffer(command_buffer, self.static_geometry_buffer, self.static_geometry_buffer_index_region.offset, vk::IndexType::UINT16);
+            // Sort out draw commands
+            // - For each model, group all transform matrices together in model_transforms.
+            // [ M1-1, M1-2, .. M1-N, M2-1, .. ]
+            // - Then, for each model, cmd_draw_indexed
+
+            for draw_command in &self.queued_draw_commands {
+                match draw_command {
+                    DrawCommand::Model(data) => {
+                        match model_transforms_map.get_mut(&data.model_id) {
+                            Some(transforms) => { transforms.push(data.transform.clone()); },
+                            None => { model_transforms_map.insert(data.model_id, vec![data.transform.clone()]); }
+                        }
+                    }
+                }
+            }
+
+            let model_counts = model_transforms_map.iter().map(|(&model_id, transforms)| {
+                (model_id, transforms.len())
+            }).collect::<BTreeMap<_,_>>();
+
+            let mut transforms = Vec::new();
+
+            model_transforms_map.iter_mut().for_each(|(model_id, t)| {
+                transforms.append(t);
+            });
+
+            upload_to_buffer(&self.device, self.model_instance_data_buffer, 0, &transforms);
+
+            // Bind geometry and instance data buffers
+            let vertex_buffers = [self.geometry_buffer.buffer, self.model_instance_data_buffer.buffer];
+            let vertex_offsets = [0, 0];
+
+            self.device.cmd_bind_vertex_buffers(command_buffer, 0, &vertex_buffers, &vertex_offsets);
+            self.device.cmd_bind_index_buffer(command_buffer, self.geometry_buffer.buffer, self.geometry_buffer_indices_offset as u64, vk::IndexType::UINT32);
 
             let descriptor_sets = [self.descriptor_sets[image_index]];
             self.device.cmd_bind_descriptor_sets(command_buffer, vk::PipelineBindPoint::GRAPHICS, self.pipeline_layout, 0, &descriptor_sets, &[]);
 
-            // Drawing
-            self.device.cmd_draw_indexed(command_buffer, 36, 1, 0, 0, 0);
+            for (model_id, count) in model_counts {
+                let model_descriptor = &self.model_descriptors[&model_id];
+
+                let vertex_offset = model_descriptor.vertex_offset;
+                let index_offset = model_descriptor.index_offset;
+                let index_count = model_descriptor.num_indices;
+
+                self.device.cmd_draw_indexed(command_buffer, index_count as u32, count as u32, index_offset as u32, vertex_offset as i32, 0);
+            }
 
             self.device.cmd_end_render_pass(command_buffer);
-
             self.device.end_command_buffer(command_buffer)
                 .expect("Failed to end command buffer");
         };
@@ -1307,14 +1238,12 @@ impl Renderer {
         let model = Matrix4::identity();
 
         let ubo = UniformBufferObject {
-            model,
-            view,
-            projection
+            proj_view_model: projection * view * model
         };
 
         let memory_offset = image_index * std::mem::size_of::<UniformBufferObject>();
 
-        upload_to_buffer(&self.device, self.uniform_buffer_memory, memory_offset as u64, std::slice::from_ref(&ubo));
+        upload_to_buffer(&self.device, self.uniform_buffer, memory_offset as u64, std::slice::from_ref(&ubo));
 
         let wait_semaphores = [self.image_available_semaphores[self.current_frame]];
         let wait_stages = [vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT];
@@ -1355,6 +1284,74 @@ impl Renderer {
                     }
                 });
         };
+    }
+
+    pub fn draw_model(&mut self, model_id: ModelId, transform: Matrix4<f32>) {
+        assert!(self.is_frame_writing, "draw_model called before begin_frame");
+
+        let draw_command = DrawCommand::Model(
+            ModelDrawCommand { model_id, transform }
+        );
+
+        self.queued_draw_commands.push(draw_command);
+    }
+
+    pub fn upload_model(&mut self, model: &Model) -> Result<ModelId, ()> {
+
+        let model_num_vertices = model.vertices.len();
+        let model_num_indices = model.indices.len();
+
+        let vertices_size = (std::mem::size_of::<Vertex>() * model_num_vertices) as u64;
+        let indices_size = (std::mem::size_of::<ModelIndex>() * model_num_indices) as u64;
+
+        // Upload vertices and indices to staging buffer
+
+        upload_to_buffer(&self.device, self.staging_buffer, 0, &model.vertices)
+            .map_err(|_|())?;
+
+        upload_to_buffer(&self.device, self.staging_buffer, vertices_size, &model.indices)
+            .map_err(|_|())?;
+
+        // Copy over to geometry buffer
+
+        // Vertices
+        copy_buffer(
+            self.staging_buffer,     // Source
+            self.geometry_buffer,    // Destination
+            vertices_size,           // Size
+            0,                       // Src offset
+            (self.geometry_buffer_num_vertices * std::mem::size_of::<Vertex>()) as u64, // Dst offset
+            &self.device, self.upload_command_buffer, self.graphics_queue
+        ).map_err(|_|())?;
+
+        // Indices
+        copy_buffer(
+            self.staging_buffer,     // Source
+            self.geometry_buffer,    // Destination
+            indices_size,            // Size
+            vertices_size,           // Src offset
+            self.geometry_buffer_indices_offset as u64 + (self.geometry_buffer_num_indices * std::mem::size_of::<ModelIndex>()) as u64, // Dst offset
+            &self.device, self.upload_command_buffer, self.graphics_queue
+        ).map_err(|_|())?;
+
+        let model_id = self.next_model_id;
+
+        let model_descriptor = ModelDescriptor {
+            model_id,
+            num_vertices: model.vertices.len(),
+            num_indices: model.indices.len(),
+            vertex_offset: self.geometry_buffer_num_vertices,
+            index_offset: self.geometry_buffer_num_indices,
+        };
+
+        self.model_descriptors.insert(model_id, model_descriptor);
+
+        self.geometry_buffer_num_vertices += model_num_vertices;
+        self.geometry_buffer_num_indices += model_num_indices;
+
+        self.next_model_id = ModelId(model_id.0 + 1);
+
+        Ok(model_id)
     }
 }
 

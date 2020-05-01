@@ -2,8 +2,6 @@ extern crate shaderc;
 
 use std::error::Error;
 use shaderc::{ShaderKind};
-use std::env;
-use std::path::PathBuf;
 
 // fn build_vr() -> Result<(), Box<dyn Error>> {
 //
@@ -44,7 +42,8 @@ fn build_shaders() -> Result<(), Box<dyn Error>> {
     // println!("cargo:rerun-if-changed={}", shaders_output_dir);
 
     // Create destination path if necessary
-    std::fs::create_dir_all(shaders_output_dir);
+    std::fs::create_dir_all(shaders_output_dir)
+        .expect("Failed to create shader output directory");
 
     let mut compiler = shaderc::Compiler::new()
         .expect("Failed to create compiler");

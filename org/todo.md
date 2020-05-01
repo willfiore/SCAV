@@ -1,7 +1,5 @@
 # TODO
 
-- 
-
 ## Brain dump
 
 - Player movement controller

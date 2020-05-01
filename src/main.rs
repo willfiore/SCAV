@@ -2,8 +2,9 @@
 
 extern crate nalgebra as na;
 
-mod renderer;
 mod input;
+mod renderer;
+mod static_resources;
 
 use winit::{
     event::{Event, WindowEvent},
@@ -22,6 +23,7 @@ use winit::event::{VirtualKeyCode, ElementState, DeviceEvent};
 use crate::input::Input;
 use na::{Point3, Matrix4, Rotation3};
 use std::f32::consts::PI;
+use crate::static_resources::model_cube;
 
 const LOGIC_TICK_DURATION: Duration = Duration::from_millis(20);
 const PLAYER_SPEED: f32 = 5.0;
@@ -89,6 +91,9 @@ fn main() {
         .expect("Failed to create window");
 
     let mut renderer = Renderer::new(&window);
+
+    let cube_model_id = renderer.upload_model(&model_cube())
+        .unwrap();
 
     // Timers
     let mut last_time = Instant::now();
@@ -182,7 +187,15 @@ fn main() {
                 // Hard-coded head height for now
                 camera.position.y = 2.0;
 
-                renderer.draw_frame(&camera);
+                renderer.begin_frame();
+
+                for i in 0..100 {
+                    let x = i % 20;
+                    let y = i / 20;
+                    renderer.draw_model(cube_model_id, Matrix4::identity().append_translation(&Vector3::new(x as f32, (x + y) as f32 * 0.25, y as f32)));
+                }
+
+                renderer.end_frame(&camera);
 
             },
             _ => {}
