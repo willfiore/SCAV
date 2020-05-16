@@ -164,7 +164,7 @@ struct UniformBufferObject {
     proj_view_model: Matrix4<f32>,
 }
 
-static MAX_FRAMES_IN_FLIGHT: usize = 3;
+static MAX_FRAMES_IN_FLIGHT: usize = 2;
 
 /// Vulkan renderer
 pub struct Renderer {
@@ -194,6 +194,8 @@ pub struct Renderer {
     swapchain_loader: ash::extensions::khr::Swapchain,
     swapchain: vk::SwapchainKHR,
     swapchain_images: Vec<vk::Image>,
+
+    depth_image: GpuImage,
 
     command_pool: vk::CommandPool,
     swapchain_command_buffers: Vec<vk::CommandBuffer>,
@@ -235,6 +237,13 @@ struct GpuBuffer {
     memory: vk::DeviceMemory,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct GpuImage {
+    image: vk::Image,
+    memory: vk::DeviceMemory,
+    view: vk::ImageView,
+}
+
 fn extension_names() -> Vec<*const i8> {
     use ash::extensions::*;
 
@@ -261,6 +270,93 @@ fn find_memory_type_index(type_filter: u32, properties: vk::MemoryPropertyFlags,
     }
 
     return Err(());
+}
+
+fn create_image_view(
+    device: &ash::Device,
+    image: vk::Image,
+    format: vk::Format,
+    aspect_flags: vk::ImageAspectFlags,
+) -> Result<vk::ImageView, ()> {
+
+    let image_view_create_info = vk::ImageViewCreateInfo::builder()
+        .image(image)
+        .view_type(vk::ImageViewType::TYPE_2D)
+        .format(format)
+        .subresource_range(vk::ImageSubresourceRange {
+            aspect_mask: aspect_flags,
+            base_mip_level: 0,
+            level_count: 1,
+            base_array_layer: 0,
+            layer_count: 1
+        });
+
+    let image_view = unsafe { device.create_image_view(&image_view_create_info, None) }
+        .map_err(|_|())?;
+
+    Ok(image_view)
+}
+
+fn create_image(
+    instance: &ash::Instance,
+    device: &ash::Device,
+    physical_device: vk::PhysicalDevice,
+    size: vk::Extent2D,
+    format: vk::Format,
+    tiling: vk::ImageTiling,
+    usage_flags: vk::ImageUsageFlags,
+    aspect_flags: vk::ImageAspectFlags,
+    memory_properties: vk::MemoryPropertyFlags,
+) -> Result<GpuImage, ()> {
+
+    // IMAGE
+
+    let image_create_info = vk::ImageCreateInfo::builder()
+        .image_type(vk::ImageType::TYPE_2D)
+        .extent(vk::Extent3D {
+            width: size.width,
+            height: size.height,
+            depth: 1
+        })
+        .mip_levels(1)
+        .array_layers(1)
+        .format(format)
+        .tiling(tiling)
+        .initial_layout(vk::ImageLayout::UNDEFINED)
+        .usage(usage_flags)
+        .samples(vk::SampleCountFlags::TYPE_1)
+        .sharing_mode(vk::SharingMode::EXCLUSIVE);
+
+    let image = unsafe { device.create_image(&image_create_info, None) }
+        .map_err(|_|())?;
+
+    // MEMORY
+
+    let memory_requirements = unsafe { device.get_image_memory_requirements(image) };
+
+    let memory_type_index = find_memory_type_index(
+        memory_requirements.memory_type_bits,
+        memory_properties,
+        instance,
+        physical_device
+    ).map_err(|_|())?;
+
+    let memory_allocate_info = vk::MemoryAllocateInfo::builder()
+        .allocation_size(memory_requirements.size)
+        .memory_type_index(memory_type_index);
+
+    let memory = unsafe { device.allocate_memory(&memory_allocate_info, None) }
+        .map_err(|_|())?;
+
+    unsafe { device.bind_image_memory(image, memory, 0) }
+        .map_err(|_|())?;
+
+    // VIEW
+
+    let view = create_image_view(device, image, format, aspect_flags)
+        .map_err(|_|())?;
+
+    Ok( GpuImage { image, memory, view } )
 }
 
 fn create_buffer(instance: &ash::Instance,
@@ -553,31 +649,31 @@ impl Renderer {
         let swapchain = unsafe { swapchain_loader.create_swapchain(&swapchain_create_info, None) }
             .expect("Failed to create swapchain");
 
-        // IMAGES
+        // SWAPCHAIN IMAGES
 
         let swapchain_images = unsafe { swapchain_loader.get_swapchain_images(swapchain) }
             .expect("Failed to get swapchain images");
 
-        // IMAGE VIEWS
+        // SWAPCHAIN IMAGE VIEWS
 
         let swapchain_image_views = swapchain_images.iter().map(|&image| {
-            let create_info = vk::ImageViewCreateInfo::builder()
-                .view_type(vk::ImageViewType::TYPE_2D)
-                .format(surface_format.format)
-                .components(vk::ComponentMapping::default())
-                .subresource_range(vk::ImageSubresourceRange {
-                    aspect_mask: vk::ImageAspectFlags::COLOR,
-                    base_mip_level: 0,
-                    level_count: 1,
-                    base_array_layer: 0,
-                    layer_count: 1
-                })
-                .image(image);
-
-            unsafe { device.create_image_view(&create_info, None) }
+            create_image_view(&device, image, surface_format.format, vk::ImageAspectFlags::COLOR)
                 .expect("Failed to create image view")
-
         }).collect::<Vec<_>>();
+
+        // DEPTH IMAGES
+
+        let depth_image_format = vk::Format::D32_SFLOAT_S8_UINT;
+
+        let depth_image = create_image(
+            &instance, &device, physical_device,
+            extent,
+            depth_image_format,
+            vk::ImageTiling::OPTIMAL,
+            vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT,
+            vk::ImageAspectFlags::DEPTH,
+            vk::MemoryPropertyFlags::DEVICE_LOCAL,
+        ).expect("Failed to create depth image");
 
         // RENDER PIPELINE
 
@@ -683,7 +779,16 @@ impl Renderer {
             .alpha_to_coverage_enable(false)
             .alpha_to_one_enable(false);
 
-        // let depth_stencil_state_create_info = vk::PipelineDepthStencilStateCreateInfo::builder();
+        let depth_stencil_state_create_info = vk::PipelineDepthStencilStateCreateInfo::builder()
+            .depth_test_enable(true)
+            .depth_write_enable(true)
+            .depth_compare_op(vk::CompareOp::LESS)
+            .depth_bounds_test_enable(false)
+            .min_depth_bounds(0.0)
+            .max_depth_bounds(1.0)
+            .stencil_test_enable(false)
+            .front(vk::StencilOpState::default())
+            .back(vk::StencilOpState::default());
 
         // ColorBlendAttachmentState - after a fragment shader has returned a color, how to
         // blend it with the color already in the framebuffer
@@ -758,12 +863,27 @@ impl Renderer {
             .attachment(0)
             .layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL);
 
-        let attachments = [*color_attachment];
+        let depth_attachment = vk::AttachmentDescription::builder()
+            .format(depth_image_format)
+            .samples(vk::SampleCountFlags::TYPE_1)
+            .load_op(vk::AttachmentLoadOp::CLEAR)
+            .store_op(vk::AttachmentStoreOp::DONT_CARE)
+            .stencil_load_op(vk::AttachmentLoadOp::DONT_CARE)
+            .stencil_store_op(vk::AttachmentStoreOp::DONT_CARE)
+            .initial_layout(vk::ImageLayout::UNDEFINED)
+            .final_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
+
+        let depth_attachment_ref = vk::AttachmentReference::builder()
+            .attachment(1)
+            .layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
+
+        let attachments = [*color_attachment, *depth_attachment];
         let color_attachment_refs = [*color_attachment_ref];
 
         let subpass = vk::SubpassDescription::builder()
             .pipeline_bind_point(vk::PipelineBindPoint::GRAPHICS)
-            .color_attachments(&color_attachment_refs);
+            .color_attachments(&color_attachment_refs)
+            .depth_stencil_attachment(&depth_attachment_ref);
 
         let subpasses = [*subpass];
 
@@ -792,6 +912,7 @@ impl Renderer {
             .rasterization_state(&rasterization_state_create_info)
             .multisample_state(&multisample_state_create_info)
             .color_blend_state(&color_blend_state_create_info)
+            .depth_stencil_state(&depth_stencil_state_create_info)
             .layout(pipeline_layout)
             .render_pass(render_pass)
             .subpass(0)
@@ -805,8 +926,8 @@ impl Renderer {
         // FRAMEBUFFERS
 
         // Create a framebuffer per image view
-        let framebuffers = swapchain_image_views.iter().map(|&v| {
-            let attachments = [v];
+        let framebuffers = swapchain_image_views.iter().map(|&image_view| {
+            let attachments = [image_view, depth_image.view];
 
             let create_info = vk::FramebufferCreateInfo::builder()
                 .render_pass(render_pass)
@@ -1039,6 +1160,8 @@ impl Renderer {
             swapchain,
             swapchain_images,
 
+            depth_image,
+
             command_pool,
             swapchain_command_buffers,
             upload_command_buffer,
@@ -1138,11 +1261,10 @@ impl Renderer {
             self.device.begin_command_buffer(command_buffer, &begin_info)
                 .expect("Failed to begin comomand buffer");
 
-            let clear_value = vk::ClearValue {
-                color: vk::ClearColorValue { float32: [ 0.0, 0.0, 0.0, 1.0 ] }
-            };
-
-            let clear_values = [clear_value];
+            let clear_values = [
+                vk::ClearValue { color: vk::ClearColorValue { float32: [ 0.0, 0.0, 0.0, 1.0 ] } },
+                vk::ClearValue { depth_stencil: vk::ClearDepthStencilValue { depth: 1.0, stencil: 0 } }
+            ];
 
             let render_pass_begin_info = vk::RenderPassBeginInfo::builder()
                 .render_pass(self.render_pass)
