@@ -13,6 +13,13 @@
     - In world, floating UI elements
     - Debug console
     - SDF (multi-channel?) for text
+    
+- Environments
+    - Gritty, worn areas (maintenance shafts)
+    - Infestation / flora overtaken
+    - "Experimental" rooms
+        - Reality distortion
+        - Non-Euclidean spaces?
 
 - Weapons and Items
     - Torch

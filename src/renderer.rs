@@ -37,7 +37,7 @@ impl Camera {
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct Vertex {
-    pub position: Vector3<f32>,
+    pub position: Point3<f32>,
     pub color: Vector3<f32>
 }
 
@@ -141,8 +141,15 @@ struct ModelDrawCommand {
     transform: Matrix4::<f32>,
 }
 
+struct LineDrawCommand {
+    begin: Point3<f32>,
+    end:   Point3<f32>,
+    color: Vector3<f32>
+}
+
 enum DrawCommand {
-    Model(ModelDrawCommand)
+    Model(ModelDrawCommand),
+    Line(LineDrawCommand)
 }
 
 pub type ModelIndex = u32;
@@ -161,7 +168,7 @@ struct BufferRegion {
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 struct UniformBufferObject {
-    proj_view_model: Matrix4<f32>,
+    proj_view: Matrix4<f32>,
 }
 
 static MAX_FRAMES_IN_FLIGHT: usize = 2;
@@ -205,7 +212,9 @@ pub struct Renderer {
     render_finished_semaphores: Vec<vk::Semaphore>,
 
     pipeline_layout: vk::PipelineLayout,
-    pipeline: vk::Pipeline,
+
+    pipeline: vk::Pipeline, // for drawing normal 3d models
+    line_pipeline: vk::Pipeline, // for drawing lines
 
     render_pass: vk::RenderPass,
     framebuffers: Vec<vk::Framebuffer>,
@@ -219,6 +228,8 @@ pub struct Renderer {
     geometry_buffer_indices_offset:  usize,
     geometry_buffer_num_vertices: usize,
     geometry_buffer_num_indices: usize,
+
+    stream_buffer: GpuBuffer,
 
     model_instance_data_buffer: GpuBuffer, // Stores transform matrices per instance
 
@@ -692,6 +703,11 @@ impl Renderer {
                 .expect("Failed to create vertex shader module")
         };
 
+        let vertex_shader_stage_create_info = vk::PipelineShaderStageCreateInfo::builder()
+            .stage(vk::ShaderStageFlags::VERTEX)
+            .module(vertex_shader_module)
+            .name(&shader_function_entry_point);
+
         let fragment_shader_module = {
             let mut spv_file = Cursor::new(&include_bytes!("../assets/shaders/generated/basic.frag.spv")[..]);
             let code = ash::util::read_spv(&mut spv_file)
@@ -703,11 +719,6 @@ impl Renderer {
             unsafe { device.create_shader_module(&create_info, None) }
                 .expect("Failed to create fragment shader module")
         };
-
-        let vertex_shader_stage_create_info = vk::PipelineShaderStageCreateInfo::builder()
-            .stage(vk::ShaderStageFlags::VERTEX)
-            .module(vertex_shader_module)
-            .name(&shader_function_entry_point);
 
         let fragment_shader_stage_create_info = vk::PipelineShaderStageCreateInfo::builder()
             .stage(vk::ShaderStageFlags::FRAGMENT)
@@ -904,24 +915,93 @@ impl Renderer {
         let render_pass = unsafe { device.create_render_pass(&render_pass_create_info, None) }
             .expect("Failed to create render pass");
 
-        let graphics_pipeline_create_info = vk::GraphicsPipelineCreateInfo::builder()
-            .stages(&shader_stage_create_infos)
-            .vertex_input_state(&vertex_input_state_create_info)
-            .input_assembly_state(&input_assembly_state_create_info)
-            .viewport_state(&viewport_state_create_info)
-            .rasterization_state(&rasterization_state_create_info)
-            .multisample_state(&multisample_state_create_info)
-            .color_blend_state(&color_blend_state_create_info)
-            .depth_stencil_state(&depth_stencil_state_create_info)
-            .layout(pipeline_layout)
-            .render_pass(render_pass)
-            .subpass(0)
-            .base_pipeline_handle(vk::Pipeline::null())
-            .base_pipeline_index(-1);
+        // Normal pipeline
+        let pipeline = {
+            let graphics_pipeline_create_info = vk::GraphicsPipelineCreateInfo::builder()
+                .stages(&shader_stage_create_infos)
+                .vertex_input_state(&vertex_input_state_create_info)
+                .input_assembly_state(&input_assembly_state_create_info)
+                .viewport_state(&viewport_state_create_info)
+                .rasterization_state(&rasterization_state_create_info)
+                .multisample_state(&multisample_state_create_info)
+                .color_blend_state(&color_blend_state_create_info)
+                .depth_stencil_state(&depth_stencil_state_create_info)
+                .layout(pipeline_layout)
+                .render_pass(render_pass)
+                .subpass(0)
+                .base_pipeline_handle(vk::Pipeline::null())
+                .base_pipeline_index(-1);
 
-        let pipeline = unsafe {
-            device.create_graphics_pipelines(vk::PipelineCache::null(), &[*graphics_pipeline_create_info], None)
-        }.expect("Failed to create graphics pipeline").pop().unwrap();
+            unsafe {
+                device.create_graphics_pipelines(vk::PipelineCache::null(), &[*graphics_pipeline_create_info], None)
+            }.expect("Failed to create graphics pipeline").pop().unwrap()
+        };
+
+        // Line pipeline
+        let line_pipeline = {
+
+            // Use debug vertex shader instead
+            let vertex_shader_module = {
+                let mut spv_file = Cursor::new(&include_bytes!("../assets/shaders/generated/debug.vert.spv")[..]);
+                let code = ash::util::read_spv(&mut spv_file)
+                    .expect("Failed to read vertex shader spv file");
+
+                let create_info = vk::ShaderModuleCreateInfo::builder()
+                    .code(&code);
+
+                unsafe { device.create_shader_module(&create_info, None) }
+                    .expect("Failed to create vertex shader module")
+            };
+
+            let vertex_shader_stage_create_info = vk::PipelineShaderStageCreateInfo::builder()
+                .stage(vk::ShaderStageFlags::VERTEX)
+                .module(vertex_shader_module)
+                .name(&shader_function_entry_point);
+
+            let shader_stage_create_infos = [*vertex_shader_stage_create_info, *fragment_shader_stage_create_info];
+
+            // We don't bind model transform attribute here
+
+            // Vertex bindings
+            let vertex_binding_descriptions = [Vertex::binding_description()];
+            let vertex_attribute_descriptions = &Vertex::attribute_descriptions()[..];
+
+            // VertexInputState - Format of vertex data passed to vertex shader
+            let vertex_input_state_create_info = vk::PipelineVertexInputStateCreateInfo::builder()
+                .vertex_binding_descriptions(&vertex_binding_descriptions)
+                .vertex_attribute_descriptions(&vertex_attribute_descriptions);
+
+            let input_assembly_state_create_info = vk::PipelineInputAssemblyStateCreateInfo::builder()
+                .topology(vk::PrimitiveTopology::LINE_LIST)
+                .primitive_restart_enable(false);
+
+            let graphics_pipeline_create_info = vk::GraphicsPipelineCreateInfo::builder()
+                .stages(&shader_stage_create_infos)
+                .vertex_input_state(&vertex_input_state_create_info)
+                .input_assembly_state(&input_assembly_state_create_info)
+                .viewport_state(&viewport_state_create_info)
+                .rasterization_state(&rasterization_state_create_info)
+                .multisample_state(&multisample_state_create_info)
+                .color_blend_state(&color_blend_state_create_info)
+                .depth_stencil_state(&depth_stencil_state_create_info)
+                .layout(pipeline_layout)
+                .render_pass(render_pass)
+                .subpass(0)
+                .base_pipeline_handle(vk::Pipeline::null())
+                .base_pipeline_index(-1);
+
+            let p = unsafe {
+                device.create_graphics_pipelines(vk::PipelineCache::null(), &[*graphics_pipeline_create_info], None)
+            }.expect("Failed to create graphics pipeline").pop().unwrap();
+
+            unsafe { device.destroy_shader_module(vertex_shader_module, None) };
+            p
+        };
+
+        unsafe {
+            device.destroy_shader_module(vertex_shader_module, None);
+            device.destroy_shader_module(fragment_shader_module, None);
+        }
 
         // FRAMEBUFFERS
 
@@ -994,6 +1074,17 @@ impl Renderer {
             vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
         ).expect("Failed to create vertex buffer");
 
+        // Dynamic streaming buffer
+
+        let stream_buffer_max_size: usize = 10 * 1024 * 1024;
+
+        let stream_buffer = create_buffer(
+            &instance, &device, physical_device,
+            stream_buffer_max_size as u64,
+            vk::BufferUsageFlags::VERTEX_BUFFER,
+            vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
+        ).expect("Failed to create stream buffer");
+
         // Uniform buffer
 
         let uniform_buffer_size = (std::mem::size_of::<UniformBufferObject>() * swapchain_images.len()) as u64;
@@ -1013,11 +1104,8 @@ impl Renderer {
         let view = Matrix4::identity()
             .append_translation(&Vector3::new(0.2, 0.2, 0.2));
 
-        let model = Matrix4::identity()
-            .append_translation(&Vector3::new(3.0, 3.0, -10.0));
-
         let default_ubo = UniformBufferObject {
-            proj_view_model: projection * view * model
+            proj_view: projection * view
         };
 
         let default_ubos = vec![default_ubo; swapchain_images.len()];
@@ -1129,11 +1217,6 @@ impl Renderer {
         let in_flight_image_fences = vec![vk::Fence::null(); swapchain_images.len()];
         let current_frame: usize = 0;
 
-        unsafe {
-            device.destroy_shader_module(vertex_shader_module, None);
-            device.destroy_shader_module(fragment_shader_module, None);
-        }
-
         let renderer = Self {
             instance,
             physical_device,
@@ -1171,6 +1254,7 @@ impl Renderer {
 
             pipeline_layout,
             pipeline,
+            line_pipeline,
 
             render_pass,
             framebuffers,
@@ -1183,6 +1267,8 @@ impl Renderer {
             geometry_buffer_indices_offset,
             geometry_buffer_num_vertices: 0,
             geometry_buffer_num_indices: 0,
+
+            stream_buffer,
 
             model_instance_data_buffer,
 
@@ -1278,16 +1364,13 @@ impl Renderer {
                 })
                 .clear_values(&clear_values);
 
-            // Render pass
-            self.device.cmd_begin_render_pass(command_buffer, &render_pass_begin_info, vk::SubpassContents::INLINE);
-            self.device.cmd_bind_pipeline(command_buffer, vk::PipelineBindPoint::GRAPHICS, self.pipeline);
-
-            let mut model_transforms_map: BTreeMap<ModelId, Vec<Matrix4<f32>>> = BTreeMap::new();
-
             // Sort out draw commands
             // - For each model, group all transform matrices together in model_transforms.
             // [ M1-1, M1-2, .. M1-N, M2-1, .. ]
             // - Then, for each model, cmd_draw_indexed
+
+            let mut model_transforms_map: BTreeMap<ModelId, Vec<Matrix4<f32>>> = BTreeMap::new();
+            let mut line_vertices: Vec<Vertex> = Vec::new();
 
             for draw_command in &self.queued_draw_commands {
                 match draw_command {
@@ -1296,6 +1379,16 @@ impl Renderer {
                             Some(transforms) => { transforms.push(data.transform.clone()); },
                             None => { model_transforms_map.insert(data.model_id, vec![data.transform.clone()]); }
                         }
+                    }
+                    DrawCommand::Line(data) => {
+                        line_vertices.push(Vertex {
+                            position: data.begin.clone(),
+                            color: data.color.clone()
+                        });
+                        line_vertices.push(Vertex {
+                            position: data.end.clone(),
+                            color: data.color.clone()
+                        });
                     }
                 }
             }
@@ -1311,8 +1404,12 @@ impl Renderer {
             });
 
             upload_to_buffer(&self.device, self.model_instance_data_buffer, 0, &transforms);
+            upload_to_buffer(&self.device, self.stream_buffer, 0, &line_vertices);
 
-            // Bind geometry and instance data buffers
+            // Begin render pass
+            self.device.cmd_begin_render_pass(command_buffer, &render_pass_begin_info, vk::SubpassContents::INLINE);
+            self.device.cmd_bind_pipeline(command_buffer, vk::PipelineBindPoint::GRAPHICS, self.pipeline);
+
             let vertex_buffers = [self.geometry_buffer.buffer, self.model_instance_data_buffer.buffer];
             let vertex_offsets = [0, 0];
 
@@ -1322,7 +1419,8 @@ impl Renderer {
             let descriptor_sets = [self.descriptor_sets[image_index]];
             self.device.cmd_bind_descriptor_sets(command_buffer, vk::PipelineBindPoint::GRAPHICS, self.pipeline_layout, 0, &descriptor_sets, &[]);
 
-            for (model_id, count) in model_counts {
+            // Draw models
+            for (&model_id, &count) in &model_counts {
                 let model_descriptor = &self.model_descriptors[&model_id];
 
                 let vertex_offset = model_descriptor.vertex_offset;
@@ -1332,6 +1430,30 @@ impl Renderer {
                 self.device.cmd_draw_indexed(command_buffer, index_count as u32, count as u32, index_offset as u32, vertex_offset as i32, 0);
             }
 
+            // Draw lines
+            self.device.cmd_bind_pipeline(command_buffer, vk::PipelineBindPoint::GRAPHICS, self.line_pipeline);
+
+            let vertex_buffers = [self.stream_buffer.buffer];
+            let vertex_offsets = [0];
+
+            self.device.cmd_bind_vertex_buffers(command_buffer, 0, &vertex_buffers, &vertex_offsets);
+
+            let clear_attachment = vk::ClearAttachment::builder()
+                .aspect_mask(vk::ImageAspectFlags::DEPTH)
+                .clear_value(vk::ClearValue { depth_stencil: vk::ClearDepthStencilValue { depth: 1.0, stencil: 0 } } );
+
+            let clear_rect = vk::ClearRect::builder()
+                .rect(vk::Rect2D {
+                    offset: vk::Offset2D { x: 0, y: 0 },
+                    extent: self.extent
+                })
+                .base_array_layer(0)
+                .layer_count(1);
+
+            // self.device.cmd_clear_attachments(command_buffer, std::slice::from_ref(&clear_attachment), std::slice::from_ref(&clear_rect));
+
+            self.device.cmd_draw(command_buffer, line_vertices.len() as u32, 1, 0, 0);
+
             self.device.cmd_end_render_pass(command_buffer);
             self.device.end_command_buffer(command_buffer)
                 .expect("Failed to end command buffer");
@@ -1340,7 +1462,7 @@ impl Renderer {
         // Update uniform buffer for frame
         let aspect_ratio = (self.extent.width as f32) / (self.extent.height as f32);
 
-        let projection = na::geometry::Perspective3::new(aspect_ratio, 1.0, 0.1, 100.0)
+        let projection = na::geometry::Perspective3::new(aspect_ratio, 1.0, 0.1, 1000.0)
             .to_homogeneous();
 
         let view = {
@@ -1357,10 +1479,8 @@ impl Renderer {
             rotation_pitch * rotation_yaw * translation
         };
 
-        let model = Matrix4::identity();
-
         let ubo = UniformBufferObject {
-            proj_view_model: projection * view * model
+            proj_view: projection * view
         };
 
         let memory_offset = image_index * std::mem::size_of::<UniformBufferObject>();
@@ -1408,7 +1528,17 @@ impl Renderer {
         };
     }
 
-    pub fn draw_model(&mut self, model_id: ModelId, transform: Matrix4<f32>) {
+    pub fn add_line(&mut self, begin: Point3<f32>, end: Point3<f32>, color: Vector3<f32>) {
+        assert!(self.is_frame_writing, "draw_model called before begin_frame");
+
+        let draw_command = DrawCommand::Line(
+            LineDrawCommand { begin, end, color }
+        );
+
+        self.queued_draw_commands.push(draw_command)
+    }
+
+    pub fn add_model(&mut self, model_id: ModelId, transform: Matrix4<f32>) {
         assert!(self.is_frame_writing, "draw_model called before begin_frame");
 
         let draw_command = DrawCommand::Model(

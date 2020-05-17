@@ -1,4 +1,4 @@
-use winit::event::{VirtualKeyCode, MouseButton};
+use winit::event::{MouseButton, VirtualKeyCode};
 
 #[derive(Default, Copy, Clone)]
 pub struct InputState {
@@ -14,7 +14,6 @@ pub struct Input {
 }
 
 impl Input {
-
     pub fn new() -> Input {
         Input {
             key_states: [InputState::default(); 1024],

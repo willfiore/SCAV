@@ -12,18 +12,22 @@ use winit::{
     window::WindowBuilder,
 };
 
-#[allow(unused_imports)]
-use log::{error, warn, info, debug, trace};
+use noise::{NoiseFn, *};
+use rand::prelude::*;
 
-use winit::dpi::LogicalSize;
-use crate::renderer::{Renderer, Camera};
-use std::time::{Instant, Duration};
-use nalgebra::Vector3;
-use winit::event::{VirtualKeyCode, ElementState, DeviceEvent};
+#[allow(unused_imports)]
+use log::{debug, error, info, trace, warn};
+
 use crate::input::Input;
-use na::{Point3, Matrix4, Rotation3};
-use std::f32::consts::PI;
+use crate::renderer::{Camera, Renderer};
 use crate::static_resources::model_cube;
+use na::{Matrix4, Point3, Rotation3, Unit};
+use nalgebra::Vector3;
+use std::f32::consts::PI;
+use std::time::{Duration, Instant};
+use winit::dpi::LogicalSize;
+use winit::event::{DeviceEvent, ElementState, VirtualKeyCode};
+use winit::window::Fullscreen;
 
 const LOGIC_TICK_DURATION: Duration = Duration::from_millis(20);
 const PLAYER_SPEED: f32 = 5.0;
@@ -44,7 +48,6 @@ impl Default for GameState {
 }
 
 fn fixed_update(state: &mut GameState, input: &Input, camera: &Camera, tick: u64) {
-
     let mut movement_direction = Vector3::<f32>::zeros();
 
     if input.is_key_down(VirtualKeyCode::W) {
@@ -66,7 +69,6 @@ fn fixed_update(state: &mut GameState, input: &Input, camera: &Camera, tick: u64
     state.previous_player_position = state.player_position.clone();
 
     if movement_direction != Vector3::zeros() {
-
         let rotation_yaw = Rotation3::from_euler_angles(0.0, camera.yaw, 0.0);
         movement_direction = rotation_yaw * movement_direction;
 
@@ -78,25 +80,31 @@ fn fixed_update(state: &mut GameState, input: &Input, camera: &Camera, tick: u64
 }
 
 fn main() {
-
     simple_logger::init().expect("Failed to initialise logger");
 
     let event_loop = EventLoop::new();
 
+    let monitor = event_loop.available_monitors().next().unwrap();
+    let fullscreen = Fullscreen::Borderless(monitor);
+
     let window = WindowBuilder::new()
         .with_title("SCAV")
-        .with_inner_size(LogicalSize { width: 1280, height: 720 })
+        .with_inner_size(LogicalSize {
+            width: 1280,
+            height: 720,
+        })
         .with_resizable(false)
+        // .with_fullscreen(Some(fullscreen))
         .build(&event_loop)
         .expect("Failed to create window");
 
     let mut renderer = Renderer::new(&window);
 
-    let cube_model_id = renderer.upload_model(&model_cube())
-        .unwrap();
+    let cube_model_id = renderer.upload_model(&model_cube()).unwrap();
 
     // Timers
-    let mut last_time = Instant::now();
+    let start_time = Instant::now();
+    let mut last_time = start_time;
     let mut accumulator = Duration::new(0, 0);
     let mut current_tick = 0u64;
 
@@ -113,29 +121,36 @@ fn main() {
     window.set_cursor_visible(false);
     window.set_cursor_grab(true);
 
-    event_loop.run(move |event, _, control_flow| {
+    let perlin = Perlin::new();
 
+    event_loop.run(move |event, _, control_flow| {
         // Continuously poll instead of waiting for events
         *control_flow = ControlFlow::Poll;
 
         match event {
-
-            Event::DeviceEvent { event: DeviceEvent::MouseMotion {
-                delta
-            }, .. } =>  {
-                camera.yaw   += CAMERA_MOUSE_SENSITIVITY * delta.0 as f32;
+            Event::DeviceEvent {
+                event: DeviceEvent::MouseMotion { delta },
+                ..
+            } => {
+                camera.yaw += CAMERA_MOUSE_SENSITIVITY * delta.0 as f32;
                 camera.pitch += CAMERA_MOUSE_SENSITIVITY * delta.1 as f32;
 
-                camera.yaw   = na::wrap(camera.yaw, -PI, PI);
+                camera.yaw = na::wrap(camera.yaw, -PI, PI);
                 camera.pitch = na::clamp(camera.pitch, -PI / 2.0, PI / 2.0);
-            },
+            }
 
-            Event::WindowEvent { event: WindowEvent::KeyboardInput {
-                device_id, input, is_synthetic
-            }, .. } => {
+            Event::WindowEvent {
+                event:
+                    WindowEvent::KeyboardInput {
+                        device_id,
+                        input,
+                        is_synthetic,
+                    },
+                ..
+            } => {
                 if let Some(virtual_keycode) = input.virtual_keycode {
                     match input.state {
-                        ElementState::Pressed  => {
+                        ElementState::Pressed => {
                             let is_down = &mut key_down[virtual_keycode as usize];
 
                             if !(*is_down) {
@@ -143,21 +158,23 @@ fn main() {
                             }
 
                             *is_down = true;
-                        },
+                        }
                         ElementState::Released => {
                             key_down[virtual_keycode as usize] = false;
                             fixed_update_input.release_key(virtual_keycode)
-                        },
+                        }
                     }
                 }
             }
 
-            Event::WindowEvent { event: WindowEvent::CloseRequested, .. } => {
+            Event::WindowEvent {
+                event: WindowEvent::CloseRequested,
+                ..
+            } => {
                 *control_flow = ControlFlow::Exit;
-            },
+            }
 
             Event::MainEventsCleared => {
-
                 let current_time = Instant::now();
                 accumulator += current_time.duration_since(last_time);
                 last_time = current_time;
@@ -172,7 +189,7 @@ fn main() {
                 }
 
                 window.request_redraw();
-            },
+            }
 
             Event::RedrawRequested(_) => {
                 // Redraw the application
@@ -181,27 +198,49 @@ fn main() {
 
                 let alpha = accumulator.as_secs_f32() / LOGIC_TICK_DURATION.as_secs_f32();
 
+                let current_time_seconds = start_time.elapsed().as_secs_f64();
+
+                let terrain_height = |x: f32, z: f32| {
+                    let mut val = perlin.get([(x as f64) * 0.08, (z as f64 * 0.08), 0.015 * current_time_seconds]) as f32 * 2.0;
+                    val
+                };
+
                 // Lerp player position
-                camera.position = (1.0 - alpha) * game_state.previous_player_position + alpha * game_state.player_position.coords;
+                camera.position = (1.0 - alpha) * game_state.previous_player_position
+                    + alpha * game_state.player_position.coords;
 
                 // Hard-coded head height for now
-                camera.position.y = 2.0;
+                camera.position.y = 2.0 + (terrain_height(camera.position.x, camera.position.z) as f32);
 
                 renderer.begin_frame();
 
-                for i in 0..100 {
-                    let x = i % 20;
-                    let y = i / 20;
-                    renderer.draw_model(cube_model_id, Matrix4::identity().append_translation(&Vector3::new(x as f32, (x + y) as f32 * 0.25, y as f32)));
+                let num_cubes = 32768;
+                let dim = (num_cubes as f32).sqrt() as i32;
+
+                for i in 0..num_cubes {
+
+                    let x = (i % dim) as f32;
+                    let z = (i / dim) as f32;
+
+                    let mut y = terrain_height(x, z) as f32;
+
+                    let mat_local = Matrix4::identity()
+                        .append_scaling(0.8)
+                        .append_translation(&Vector3::new(x, y, z));
+
+                    renderer.add_model(cube_model_id, mat_local);
+
+                    if i % 100 == 0 {
+                        renderer.add_line(Point3::new(x - 0.15, y + 0.55, z - 0.15), Point3::new(x + 0.15, y + 0.55, z - 0.15), Vector3::new(1.0, 0.0, 0.0));
+                        renderer.add_line(Point3::new(x + 0.15, y + 0.55, z - 0.15), Point3::new(x + 0.15, y + 0.55, z + 0.15), Vector3::new(1.0, 0.0, 0.0));
+                        renderer.add_line(Point3::new(x + 0.15, y + 0.55, z + 0.15), Point3::new(x - 0.15, y + 0.55, z + 0.15), Vector3::new(1.0, 0.0, 0.0));
+                        renderer.add_line(Point3::new(x - 0.15, y + 0.55, z + 0.15), Point3::new(x - 0.15, y + 0.55, z - 0.15), Vector3::new(1.0, 0.0, 0.0));
+                    }
                 }
 
                 renderer.end_frame(&camera);
-
-            },
+            }
             _ => {}
         }
     });
-
 }
-
-

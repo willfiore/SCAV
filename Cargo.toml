@@ -9,27 +9,29 @@ edition = "2018"
 [dependencies]
 
 # Vulkan bindings
-ash = "*"
+ash = "0.31.0"
 
 # Logging
-log = "*"
-simple_logger = "*"
+log = "0.4.8"
+simple_logger = "1.6.0"
 
 # Maths
-nalgebra = "*"
+nalgebra = "0.21.0"
+nphysics3d = "0.15.0"
 
 # Windowing
-winit = "*"
+winit = "0.22.2"
 
 # Utility
-arrayvec = "*"
-array_tool = "*"
-
+arrayvec = "0.5.1"
+array_tool = "1.0.3"
+noise = "0.6.0"
+rand = "0.7.3"
 
 [build-dependencies]
 # Shaders
-shaderc-sys = "*"
-shaderc = "*"
+shaderc-sys = "0.6.2"
+shaderc = "0.6.2"
 
 # OpenVR building
-bindgen = "*"
+bindgen = "0.53.2"

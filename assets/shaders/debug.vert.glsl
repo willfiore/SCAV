@@ -13,9 +13,6 @@ layout (binding = 0) uniform UniformBufferObject {
 layout (location = 0) in vec3 a_position;
 layout (location = 1) in vec3 a_color;
 
-// Per-instance model matrix
-layout (location = 2) in mat4 a_model;
-
 /////////////
 // OUTPUTS
 /////////////
@@ -24,5 +21,5 @@ layout (location = 0) out vec3 vs_color;
 
 void main() {
     vs_color = a_color;
-    gl_Position = ubo.proj_view * a_model * vec4(a_position, 1.0);
+    gl_Position = ubo.proj_view * vec4(a_position, 1.0);
 }
