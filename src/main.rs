@@ -20,7 +20,7 @@ use log::{debug, error, info, trace, warn};
 
 use crate::input::Input;
 use crate::renderer::{Camera, Renderer};
-use crate::static_resources::model_cube;
+use crate::static_resources::{model_cube, font_arial};
 use na::{Matrix4, Point3, Rotation3, Unit};
 use nalgebra::Vector3;
 use std::f32::consts::PI;
@@ -80,6 +80,7 @@ fn fixed_update(state: &mut GameState, input: &Input, camera: &Camera, tick: u64
 }
 
 fn main() {
+
     simple_logger::init().expect("Failed to initialise logger");
 
     let event_loop = EventLoop::new();
@@ -101,6 +102,7 @@ fn main() {
     let mut renderer = Renderer::new(&window);
 
     let cube_model_id = renderer.upload_model(&model_cube()).unwrap();
+    let font_arial_id = renderer.upload_font(&font_arial()).unwrap();
 
     // Timers
     let start_time = Instant::now();
@@ -214,7 +216,7 @@ fn main() {
 
                 renderer.begin_frame();
 
-                let num_cubes = 32768;
+                let num_cubes = 49;
                 let dim = (num_cubes as f32).sqrt() as i32;
 
                 for i in 0..num_cubes {
@@ -225,12 +227,12 @@ fn main() {
                     let mut y = terrain_height(x, z) as f32;
 
                     let mat_local = Matrix4::identity()
-                        .append_scaling(0.8)
+                        .append_scaling(1.0)
                         .append_translation(&Vector3::new(x, y, z));
 
                     renderer.add_model(cube_model_id, mat_local);
 
-                    if i % 100 == 0 {
+                    if i % 2 == 0 {
                         renderer.add_line(Point3::new(x - 0.15, y + 0.55, z - 0.15), Point3::new(x + 0.15, y + 0.55, z - 0.15), Vector3::new(1.0, 0.0, 0.0));
                         renderer.add_line(Point3::new(x + 0.15, y + 0.55, z - 0.15), Point3::new(x + 0.15, y + 0.55, z + 0.15), Vector3::new(1.0, 0.0, 0.0));
                         renderer.add_line(Point3::new(x + 0.15, y + 0.55, z + 0.15), Point3::new(x - 0.15, y + 0.55, z + 0.15), Vector3::new(1.0, 0.0, 0.0));

@@ -3,7 +3,7 @@ extern crate ash;
 
 use ash::vk as vk;
 use ash::util::Align;
-use std::ffi::{CString};
+use std::ffi::{CString, c_void};
 use ash::version::{EntryV1_0, InstanceV1_0, DeviceV1_0};
 use std::io::Cursor;
 
@@ -14,8 +14,10 @@ use winit::{
 
 use na::{Matrix4, Point3, Vector3};
 use std::collections::{HashMap, BTreeMap};
-use nalgebra::Vector4;
+use nalgebra::{Vector4, Vector2};
 use std::cmp::Ordering;
+use self::ash::vk::{ImageSubresourceLayers, Extent2D};
+use self::ash::version::InstanceV1_1;
 
 pub struct Camera {
     pub position: Point3<f32>,
@@ -38,7 +40,8 @@ impl Camera {
 #[derive(Debug, Clone, Copy)]
 pub struct Vertex {
     pub position: Point3<f32>,
-    pub color: Vector3<f32>
+    pub color: Vector3<f32>,
+    pub tex_coords: Vector2<f32>
 }
 
 impl Vertex {
@@ -51,21 +54,28 @@ impl Vertex {
         *binding_description
     }
 
-    fn attribute_descriptions() -> [vk::VertexInputAttributeDescription; 2] {
+    fn attribute_descriptions() -> [vk::VertexInputAttributeDescription; 3] {
         [
-            vk::VertexInputAttributeDescription::builder()
+            // Position
+            *vk::VertexInputAttributeDescription::builder()
                 .binding(0)
                 .location(0)
                 .format(vk::Format::R32G32B32_SFLOAT)
-                .offset(0)
-                .build(),
+                .offset(0),
 
-            vk::VertexInputAttributeDescription::builder()
+            // Color
+            *vk::VertexInputAttributeDescription::builder()
                 .binding(0)
                 .location(1)
                 .format(vk::Format::R32G32B32_SFLOAT)
-                .offset(std::mem::size_of::<na::Vector3<f32>>() as u32)
-                .build(),
+                .offset(std::mem::size_of::<na::Point3<f32>>() as u32),
+
+            // Texture coordinates
+            *vk::VertexInputAttributeDescription::builder()
+                .binding(0)
+                .location(2)
+                .format(vk::Format::R32G32_SFLOAT)
+                .offset(2 * std::mem::size_of::<na::Point3<f32>>() as u32)
         ]
     }
 }
@@ -91,28 +101,28 @@ impl InstanceData {
         [
             vk::VertexInputAttributeDescription::builder()
                 .binding(1)
-                .location(2)
+                .location(3)
                 .format(vk::Format::R32G32B32A32_SFLOAT)
                 .offset(0)
                 .build(),
 
             vk::VertexInputAttributeDescription::builder()
                 .binding(1)
-                .location(3)
+                .location(4)
                 .format(vk::Format::R32G32B32A32_SFLOAT)
                 .offset(std::mem::size_of::<Vector4<f32>>() as u32)
                 .build(),
 
             vk::VertexInputAttributeDescription::builder()
                 .binding(1)
-                .location(4)
+                .location(5)
                 .format(vk::Format::R32G32B32A32_SFLOAT)
                 .offset(2 * std::mem::size_of::<Vector4<f32>>() as u32)
                 .build(),
 
             vk::VertexInputAttributeDescription::builder()
                 .binding(1)
-                .location(5)
+                .location(6)
                 .format(vk::Format::R32G32B32A32_SFLOAT)
                 .offset(3 * std::mem::size_of::<Vector4<f32>>() as u32)
                 .build(),
@@ -124,6 +134,18 @@ impl InstanceData {
 
 #[derive(Debug, Clone, Copy, Hash, Ord, PartialOrd, PartialEq, Eq)]
 pub struct ModelId(u32);
+
+#[derive(Debug, Clone, Copy, Hash, Ord, PartialOrd, PartialEq, Eq)]
+pub struct FontId(u32);
+
+pub struct FontAtlas {
+    pub width: usize,
+    pub height: usize,
+    pub image: Vec<u8>
+
+    // Some metadata about each character, its position
+    // in the atlas, metrics etc...
+}
 
 #[derive(Debug)]
 struct ModelDescriptor {
@@ -230,11 +252,15 @@ pub struct Renderer {
     geometry_buffer_num_indices: usize,
 
     stream_buffer: GpuBuffer,
-
     model_instance_data_buffer: GpuBuffer, // Stores transform matrices per instance
+
+    sampler_clamp: vk::Sampler,
 
     model_descriptors: HashMap<ModelId, ModelDescriptor>,
     next_model_id: ModelId,
+
+    font_atlasses: HashMap<FontId, GpuImage>,
+    next_font_id: FontId,
 
     queued_draw_commands: Vec<DrawCommand>,
 
@@ -253,15 +279,23 @@ struct GpuImage {
     image: vk::Image,
     memory: vk::DeviceMemory,
     view: vk::ImageView,
+    size: vk::Extent2D,
 }
 
-fn extension_names() -> Vec<*const i8> {
+fn instance_extension_names() -> Vec<*const i8> {
     use ash::extensions::*;
 
     vec![
         khr::Surface::name().as_ptr(),
         khr::Win32Surface::name().as_ptr(),
-        ext::DebugReport::name().as_ptr()
+        ext::DebugReport::name().as_ptr(),
+    ]
+}
+
+fn device_extension_names() -> Vec<*const i8> {
+    vec![
+        ash::extensions::khr::Swapchain::name().as_ptr(),
+        vk::ExtDescriptorIndexingFn::name().as_ptr(),
     ]
 }
 
@@ -283,7 +317,33 @@ fn find_memory_type_index(type_filter: u32, properties: vk::MemoryPropertyFlags,
     return Err(());
 }
 
-fn create_image_view(
+fn create_texture_sampler(
+    device: &ash::Device,
+) -> Result<vk::Sampler, ()> {
+    let sampler_create_info = vk::SamplerCreateInfo::builder()
+        .mag_filter(vk::Filter::LINEAR)
+        .min_filter(vk::Filter::LINEAR)
+        .address_mode_u(vk::SamplerAddressMode::CLAMP_TO_EDGE)
+        .address_mode_v(vk::SamplerAddressMode::CLAMP_TO_EDGE)
+        .address_mode_w(vk::SamplerAddressMode::CLAMP_TO_EDGE)
+        .anisotropy_enable(true)
+        .max_anisotropy(16.0)
+        .border_color(vk::BorderColor::INT_OPAQUE_BLACK)
+        .unnormalized_coordinates(false)
+        .compare_enable(false)
+        .compare_op(vk::CompareOp::ALWAYS)
+        .mipmap_mode(vk::SamplerMipmapMode::LINEAR)
+        .mip_lod_bias(0.0)
+        .min_lod(0.0)
+        .max_lod(0.0);
+
+    let sampler = unsafe { device.create_sampler(&sampler_create_info, None) }
+        .map_err(|_|())?;
+
+    Ok(sampler)
+}
+
+fn create_texture_image_view(
     device: &ash::Device,
     image: vk::Image,
     format: vk::Format,
@@ -308,7 +368,7 @@ fn create_image_view(
     Ok(image_view)
 }
 
-fn create_image(
+fn create_texture_image(
     instance: &ash::Instance,
     device: &ash::Device,
     physical_device: vk::PhysicalDevice,
@@ -320,7 +380,6 @@ fn create_image(
     memory_properties: vk::MemoryPropertyFlags,
 ) -> Result<GpuImage, ()> {
 
-    // IMAGE
 
     let image_create_info = vk::ImageCreateInfo::builder()
         .image_type(vk::ImageType::TYPE_2D)
@@ -364,10 +423,10 @@ fn create_image(
 
     // VIEW
 
-    let view = create_image_view(device, image, format, aspect_flags)
+    let view = create_texture_image_view(device, image, format, aspect_flags)
         .map_err(|_|())?;
 
-    Ok( GpuImage { image, memory, view } )
+    Ok( GpuImage { image, memory, view, size } )
 }
 
 fn create_buffer(instance: &ash::Instance,
@@ -457,6 +516,53 @@ fn copy_buffer(src_buffer: GpuBuffer,
     Ok(())
 }
 
+fn copy_buffer_to_image(
+    device: &ash::Device,
+    command_buffer: vk::CommandBuffer,
+    src_buffer: GpuBuffer,
+    dst_image: GpuImage,
+    size: Extent2D
+) -> Result<(), ()> {
+    unsafe {
+
+        let command_buffer_begin_info = vk::CommandBufferBeginInfo::builder()
+            .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
+
+        let buffer_image_copy = vk::BufferImageCopy::builder()
+            .buffer_offset(0)
+            .buffer_row_length(0)
+            .buffer_image_height(0)
+            .image_subresource(ImageSubresourceLayers {
+                aspect_mask: vk::ImageAspectFlags::COLOR,
+                mip_level: 0,
+                base_array_layer: 0,
+                layer_count: 1
+            })
+            .image_offset(vk::Offset3D { x: 0, y: 0, z: 0 })
+            .image_extent(vk::Extent3D {
+                width: size.width,
+                height: size.height,
+                depth: 1
+            });
+
+        device.begin_command_buffer(command_buffer, &command_buffer_begin_info)
+            .map_err(|_|())?;
+
+        device.cmd_copy_buffer_to_image(
+            command_buffer,
+            src_buffer.buffer,
+            dst_image.image,
+            vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+            std::slice::from_ref(&buffer_image_copy)
+        );
+
+        device.end_command_buffer(command_buffer)
+            .map_err(|_|())?;
+    }
+
+    Ok(())
+}
+
 fn upload_to_buffer<T: Copy>(device: &ash::Device, buffer: GpuBuffer, offset: vk::DeviceSize, slice: &[T])
     -> Result<(), ()>
 {
@@ -501,8 +607,8 @@ impl Renderer {
             .map(|raw_name| raw_name.as_ptr())
             .collect();
 
-        let instance_extension_names_raw = extension_names();
-        let device_extension_names_raw = [ash::extensions::khr::Swapchain::name().as_ptr()];
+        let instance_extension_names_raw = instance_extension_names();
+        let device_extension_names_raw   = device_extension_names();
 
         // INSTANCE
 
@@ -524,10 +630,27 @@ impl Renderer {
             physical_devices.pop()
         }.expect("Failed to find a physical device with Vulkan support");
 
+        let physical_device_properties = unsafe { instance.get_physical_device_properties(physical_device) };
+
+        let device_extension_properties = unsafe { instance.enumerate_device_extension_properties(physical_device) }
+            .expect("Failed to enumerate device extension properties");
+
+        // Ensure we have all the required features and extensions from our device
+        // TODO: was going to use this for unbounded descriptors, but don't need for now
+
+        // let mut physical_device_descriptor_indexing_features =
+        //     vk::PhysicalDeviceDescriptorIndexingFeatures::builder().build();
+
+        // let mut physical_device_features_2 = vk::PhysicalDeviceFeatures2::builder();
+        // physical_device_features_2.p_next = &mut physical_device_descriptor_indexing_features as *mut _ as *mut c_void;
+
+        // unsafe { instance.get_physical_device_features2(physical_device, &mut physical_device_features_2) };
+
+        // println!("{:#?}", physical_device_descriptor_indexing_features);
+
         // SURFACE
 
         let surface = {
-
             let surface_create_info = vk::Win32SurfaceCreateInfoKHR::builder()
                 .hwnd(window.hwnd())
                 .hinstance(window.hinstance());
@@ -560,7 +683,8 @@ impl Renderer {
             queue_families
         };
 
-        let physical_device_features = vk::PhysicalDeviceFeatures::builder();
+        let physical_device_features = vk::PhysicalDeviceFeatures::builder()
+            .sampler_anisotropy(true); // TODO(WF): Ensure this feature is supported
 
         // Create a DeviceQueueCreateInfo per unique queue family
         let device_queue_create_infos = unique_queue_families.iter().map(|qf| {
@@ -574,6 +698,10 @@ impl Renderer {
             .queue_create_infos(&device_queue_create_infos)
             .enabled_features(&physical_device_features)
             .enabled_extension_names(&device_extension_names_raw);
+
+            // TODO: Only enable the specific indexing features we need
+            //       (this is currently all the supported features)
+            // .push_next(&mut physical_device_descriptor_indexing_features);
 
         let device = unsafe { instance.create_device(physical_device, &device_create_info, None) }
             .expect("Failed to create logical device");
@@ -604,7 +732,7 @@ impl Renderer {
                 surface_loader.get_physical_device_surface_present_modes(physical_device, surface) }
                 .expect("Failed to fetch physical device surface formats");
 
-            // Prefer MAILBOX (3-buffering) otherwise FIFO is always available
+            // Prefer MAILBOX (3-buffering), otherwise FIFO is always available
             supported_surface_present_modes.iter().find(|&&spm| {
                 spm == vk::PresentModeKHR::MAILBOX
             }).unwrap_or(&vk::PresentModeKHR::FIFO).clone()
@@ -668,7 +796,7 @@ impl Renderer {
         // SWAPCHAIN IMAGE VIEWS
 
         let swapchain_image_views = swapchain_images.iter().map(|&image| {
-            create_image_view(&device, image, surface_format.format, vk::ImageAspectFlags::COLOR)
+            create_texture_image_view(&device, image, surface_format.format, vk::ImageAspectFlags::COLOR)
                 .expect("Failed to create image view")
         }).collect::<Vec<_>>();
 
@@ -676,7 +804,7 @@ impl Renderer {
 
         let depth_image_format = vk::Format::D32_SFLOAT_S8_UINT;
 
-        let depth_image = create_image(
+        let depth_image = create_texture_image(
             &instance, &device, physical_device,
             extent,
             depth_image_format,
@@ -835,7 +963,14 @@ impl Renderer {
             .descriptor_count(1)
             .stage_flags(vk::ShaderStageFlags::VERTEX); // in which shader stages will this be used?
 
-        let layout_bindings = [*ubo_layout_binding];
+        let sampler_layout_binding = vk::DescriptorSetLayoutBinding::builder()
+            .binding(1)
+            .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+            .descriptor_count(1)
+            .immutable_samplers(&[])
+            .stage_flags(vk::ShaderStageFlags::FRAGMENT);
+
+        let layout_bindings = [*ubo_layout_binding, *sampler_layout_binding];
 
         let descriptor_set_layout_create_info = vk::DescriptorSetLayoutCreateInfo::builder()
             .bindings(&layout_bindings);
@@ -1113,11 +1248,14 @@ impl Renderer {
 
         // DESCRIPTOR SETS
 
-        let descriptor_pool_size = vk::DescriptorPoolSize::builder()
-            .ty(vk::DescriptorType::UNIFORM_BUFFER)
-            .descriptor_count(swapchain_images.len() as u32);
-
-        let descriptor_pool_sizes = [*descriptor_pool_size];
+        let descriptor_pool_sizes = [
+            *vk::DescriptorPoolSize::builder()
+                .ty(vk::DescriptorType::UNIFORM_BUFFER)
+                .descriptor_count(swapchain_images.len() as u32),
+            *vk::DescriptorPoolSize::builder()
+                .ty(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+                .descriptor_count(swapchain_images.len() as u32)
+        ];
 
         let descriptor_pool_create_info = vk::DescriptorPoolCreateInfo::builder()
             .pool_sizes(&descriptor_pool_sizes)
@@ -1147,6 +1285,10 @@ impl Renderer {
                 .buffer(uniform_buffer.buffer)
                 .offset(offset as u64)
                 .range(range as u64);
+
+            // let image_info = vk::DescriptorImageInfo::builder()
+            //     .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
+            //     .image_view()
 
             let buffer_infos = [*buffer_info];
 
@@ -1217,6 +1359,9 @@ impl Renderer {
         let in_flight_image_fences = vec![vk::Fence::null(); swapchain_images.len()];
         let current_frame: usize = 0;
 
+        let sampler_clamp = create_texture_sampler(&device)
+            .expect("Failed to create sampler");
+
         let renderer = Self {
             instance,
             physical_device,
@@ -1269,11 +1414,15 @@ impl Renderer {
             geometry_buffer_num_indices: 0,
 
             stream_buffer,
-
             model_instance_data_buffer,
+
+            sampler_clamp,
 
             model_descriptors: HashMap::new(),
             next_model_id: ModelId(0),
+
+            font_atlasses: HashMap::new(),
+            next_font_id: FontId(0),
 
             queued_draw_commands: Vec::new(),
 
@@ -1383,11 +1532,13 @@ impl Renderer {
                     DrawCommand::Line(data) => {
                         line_vertices.push(Vertex {
                             position: data.begin.clone(),
-                            color: data.color.clone()
+                            color: data.color.clone(),
+                            tex_coords: Vector2::new(0.0, 0.0)
                         });
                         line_vertices.push(Vertex {
                             position: data.end.clone(),
-                            color: data.color.clone()
+                            color: data.color.clone(),
+                            tex_coords: Vector2::new(0.0, 0.0)
                         });
                     }
                 }
@@ -1546,6 +1697,42 @@ impl Renderer {
         );
 
         self.queued_draw_commands.push(draw_command);
+    }
+
+    pub fn add_text(&mut self, text: &str, transform: Matrix4<f32>) {
+    }
+
+    pub fn upload_font(&mut self, atlas: &FontAtlas) -> Result<FontId, ()> {
+
+        upload_to_buffer(&self.device, self.staging_buffer, 0, &atlas.image)
+            .map_err(|_|())?;
+
+        let image_size = Extent2D { width: atlas.width as u32, height: atlas.height as u32 };
+
+        let atlas_image = create_texture_image(
+            &self.instance,
+            &self.device,
+            self.physical_device,
+            image_size,
+            vk::Format::R8G8B8A8_SRGB,
+            vk::ImageTiling::OPTIMAL,
+            vk::ImageUsageFlags::TRANSFER_DST | vk::ImageUsageFlags::SAMPLED,
+            vk::ImageAspectFlags::COLOR,
+            vk::MemoryPropertyFlags::DEVICE_LOCAL,
+        ).map_err(|_|())?;
+
+        copy_buffer_to_image(
+            &self.device,
+            self.upload_command_buffer,
+            self.staging_buffer,
+            atlas_image,
+            image_size
+        ).map_err(|_|())?;
+
+        let font_id = self.next_font_id;
+        self.next_font_id = FontId(font_id.0 + 1);
+
+        Ok(font_id)
     }
 
     pub fn upload_model(&mut self, model: &Model) -> Result<ModelId, ()> {
