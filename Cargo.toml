@@ -17,8 +17,7 @@ simple_logger = "1.6.0"
 
 # Maths
 nalgebra = "0.21.0"
-ncollide3d = "0.23.0"
-nphysics3d = "0.15.1"
+nphysics3d = "0.15.0"
 
 # Windowing
 winit = "0.22.2"
@@ -30,10 +29,9 @@ noise = "0.6.0"
 rand = "0.7.3"
 
 [build-dependencies]
-
 # Shaders
 shaderc-sys = "0.6.2"
 shaderc = "0.6.2"
 
 # OpenVR building
-bindgen = "0.54.0"
+bindgen = "0.53.2"

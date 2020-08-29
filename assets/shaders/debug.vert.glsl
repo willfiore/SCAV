@@ -18,10 +18,8 @@ layout (location = 1) in vec3 a_color;
 /////////////
 
 layout (location = 0) out vec3 vs_color;
-layout (location = 1) out vec2 vs_tex_coords;
 
 void main() {
     vs_color = a_color;
-    vs_tex_coords = a_color.xy;
     gl_Position = ubo.proj_view * vec4(a_position, 1.0);
 }

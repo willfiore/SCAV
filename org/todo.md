@@ -1,10 +1,5 @@
 # TODO
 
-## Now
-- MSDF font rendering
-- 2D console overlay
-- Render z-index layers
-
 ## Brain dump
 
 - Player movement controller
