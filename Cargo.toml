@@ -35,3 +35,6 @@ shaderc = "0.6.2"
 
 # OpenVR building
 bindgen = "0.53.2"
+
+[profile.release]
+debug = true

@@ -13,7 +13,6 @@ use winit::{
 };
 
 use noise::{NoiseFn, *};
-use rand::prelude::*;
 
 #[allow(unused_imports)]
 use log::{debug, error, info, trace, warn};
@@ -21,7 +20,7 @@ use log::{debug, error, info, trace, warn};
 use crate::input::Input;
 use crate::renderer::{Camera, Renderer};
 use crate::static_resources::model_cube;
-use na::{Matrix4, Point3, Rotation3, Unit};
+use na::{Matrix4, Point3, Rotation3};
 use nalgebra::Vector3;
 use std::f32::consts::PI;
 use std::time::{Duration, Instant};
@@ -82,6 +81,8 @@ fn fixed_update(state: &mut GameState, input: &Input, camera: &Camera, tick: u64
 fn main() {
     simple_logger::init().expect("Failed to initialise logger");
 
+    println!("Hello!");
+
     let event_loop = EventLoop::new();
 
     let monitor = event_loop.available_monitors().next().unwrap();
@@ -93,12 +94,11 @@ fn main() {
             width: 1280,
             height: 720,
         })
-        .with_resizable(false)
         // .with_fullscreen(Some(fullscreen))
         .build(&event_loop)
         .expect("Failed to create window");
 
-    let mut renderer = Renderer::new(&window);
+    let mut renderer = Renderer::new(&window).unwrap();
 
     let cube_model_id = renderer.upload_model(&model_cube()).unwrap();
 
@@ -118,8 +118,8 @@ fn main() {
 
     let mut camera = Camera::new();
 
-    window.set_cursor_visible(false);
-    window.set_cursor_grab(true);
+    // window.set_cursor_visible(false);
+    // window.set_cursor_grab(true).ok();
 
     let perlin = Perlin::new();
 
@@ -137,6 +137,13 @@ fn main() {
 
                 camera.yaw = na::wrap(camera.yaw, -PI, PI);
                 camera.pitch = na::clamp(camera.pitch, -PI / 2.0, PI / 2.0);
+            }
+
+            Event::WindowEvent {
+                event: WindowEvent::Resized(new_size),
+                ..
+            } => {
+                renderer.recreate_swapchain(new_size);
             }
 
             Event::WindowEvent {
@@ -201,8 +208,7 @@ fn main() {
                 let current_time_seconds = start_time.elapsed().as_secs_f64();
 
                 let terrain_height = |x: f32, z: f32| {
-                    let mut val = perlin.get([(x as f64) * 0.08, (z as f64 * 0.08), 0.015 * current_time_seconds]) as f32 * 2.0;
-                    val
+                    perlin.get([(x as f64) * 0.08, (z as f64 * 0.08), 0.015 * current_time_seconds]) as f32 * 2.0
                 };
 
                 // Lerp player position

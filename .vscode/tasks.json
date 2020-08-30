@@ -1,0 +1,26 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "rust: cargo build --release",
+            "command": "cargo",
+            "args": [
+                "build",
+                "--release"
+            ],
+            "problemMatcher": [
+                "$rustc"
+            ]
+        },
+        {
+            "label": "rust: cargo build",
+            "command": "cargo",
+            "args": [
+                "build",
+            ],
+            "problemMatcher": [
+                "$rustc"
+            ]
+        },
+    ]
+}
