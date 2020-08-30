@@ -191,6 +191,8 @@ struct BaseState {
 
     render_pass: vk::RenderPass,
     swapchain_loader: ash::extensions::khr::Swapchain,
+
+    swapchain_command_pool: vk::CommandPool,
 }
 
 struct SwapchainState {
@@ -204,7 +206,6 @@ struct SwapchainDependents {
     depth_image: GpuImage,
     framebuffers: Vec<vk::Framebuffer>,
 
-    command_pool: vk::CommandPool,
     command_buffers: Vec<vk::CommandBuffer>,
 }
 
@@ -826,15 +827,8 @@ fn create_swapchain_dependents(base_state: &BaseState, swapchain_state: &Swapcha
 
     }).collect::<Result<Vec<_>, Box<dyn Error>>>()?;
 
-    let command_pool_create_info = vk::CommandPoolCreateInfo::builder()
-        .queue_family_index(base_state.graphics_queue_family_index)
-        .flags(vk::CommandPoolCreateFlags::TRANSIENT | vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER);
-
-    let command_pool = unsafe { base_state.device.create_command_pool(&command_pool_create_info, None) }
-        .expect("Failed to create command pool");
-
     let command_buffer_allocate_info = vk::CommandBufferAllocateInfo::builder()
-        .command_pool(command_pool)
+        .command_pool(base_state.swapchain_command_pool)
         .level(vk::CommandBufferLevel::PRIMARY)
         .command_buffer_count(framebuffers.len() as u32);
 
@@ -845,7 +839,6 @@ fn create_swapchain_dependents(base_state: &BaseState, swapchain_state: &Swapcha
     Ok(SwapchainDependents {
         depth_image,
         framebuffers,
-        command_pool,
         command_buffers,
     })
 }
@@ -855,8 +848,34 @@ impl Renderer {
     pub fn recreate_swapchain(&mut self, size: PhysicalSize<u32>) -> Result<(), Box<dyn Error>> {
 
         // Cleanup
-        // FIXME: Clean up all resources correctly
         unsafe {
+
+            ////////////////////////////////
+            // Destroy swapchain dependents
+            ////////////////////////////////
+
+            // Depth image
+            self.base_state.device.destroy_image_view(self.swapchain_dependents.depth_image.view, None);
+            self.base_state.device.destroy_image(self.swapchain_dependents.depth_image.image, None);
+            self.base_state.device.free_memory(self.swapchain_dependents.depth_image.memory, None);
+
+            for framebuffer in &self.swapchain_dependents.framebuffers {
+                self.base_state.device.destroy_framebuffer(*framebuffer, None);
+            }
+
+            self.base_state.device.free_command_buffers(
+                self.base_state.swapchain_command_pool,
+                &self.swapchain_dependents.command_buffers
+            );
+
+            /////////////////////
+            // Destroy swapchain
+            /////////////////////
+
+            for image_view in &self.swapchain_state.image_views {
+                self.base_state.device.destroy_image_view(*image_view, None);
+            }
+
             self.base_state.swapchain_loader.destroy_swapchain(self.swapchain_state.swapchain, None);
             self.base_state.device.device_wait_idle()?;
         }
@@ -1041,6 +1060,13 @@ impl Renderer {
 
         let swapchain_loader = ash::extensions::khr::Swapchain::new(&instance, &device);
 
+        let swapchain_command_pool_create_info = vk::CommandPoolCreateInfo::builder()
+            .queue_family_index(graphics_queue_family_index)
+            .flags(vk::CommandPoolCreateFlags::TRANSIENT | vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER);
+
+        let swapchain_command_pool = unsafe { device.create_command_pool(&swapchain_command_pool_create_info, None) }
+            .expect("Failed to create command pool");
+
         let base_state = BaseState {
             instance,
             physical_device,
@@ -1057,7 +1083,9 @@ impl Renderer {
             present_queue_family_index,
 
             render_pass,
+
             swapchain_loader,
+            swapchain_command_pool,
         };
 
         let swapchain_state = create_swapchain_state(&base_state, window.inner_size())?;
