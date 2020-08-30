@@ -3,6 +3,7 @@
 extern crate nalgebra as na;
 
 mod input;
+mod physics;
 mod renderer;
 mod static_resources;
 
@@ -20,6 +21,7 @@ use log::{debug, error, info, trace, warn};
 use crate::input::Input;
 use crate::renderer::{Camera, Renderer};
 use crate::static_resources::model_cube;
+use crate::physics::PhysicsWorld;
 use na::{Matrix4, Point3, Rotation3};
 use nalgebra::Vector3;
 use std::f32::consts::PI;
@@ -27,6 +29,7 @@ use std::time::{Duration, Instant};
 use winit::dpi::LogicalSize;
 use winit::event::{DeviceEvent, ElementState, VirtualKeyCode};
 use winit::window::Fullscreen;
+use nphysics3d::object::{RigidBody, BodySet};
 
 const LOGIC_TICK_DURATION: Duration = Duration::from_millis(20);
 const PLAYER_SPEED: f32 = 5.0;
@@ -35,13 +38,15 @@ const CAMERA_MOUSE_SENSITIVITY: f32 = 0.001;
 struct GameState {
     player_position: Point3<f32>,
     previous_player_position: Point3<f32>,
+    physics_world: PhysicsWorld,
 }
 
-impl Default for GameState {
-    fn default() -> GameState {
-        GameState {
+impl GameState {
+    fn new() -> Self {
+        Self {
             player_position: Point3::new(0.0, 0.0, 0.0),
             previous_player_position: Point3::new(0.0, 0.0, 0.0),
+            physics_world: PhysicsWorld::new()
         }
     }
 }
@@ -76,12 +81,12 @@ fn fixed_update(state: &mut GameState, input: &Input, camera: &Camera, tick: u64
 
         state.player_position += player_position_delta;
     }
+
+    state.physics_world.step();
 }
 
 fn main() {
     simple_logger::init().expect("Failed to initialise logger");
-
-    println!("Hello!");
 
     let event_loop = EventLoop::new();
 
@@ -109,8 +114,10 @@ fn main() {
     let mut current_tick = 0u64;
 
     // States
-    let mut game_state = GameState::default();
+    let mut game_state = GameState::new();
     let mut fixed_update_input = Input::new();
+
+    game_state.physics_world.set_timestep(LOGIC_TICK_DURATION.as_secs_f32());
 
     // Track which keys are down at the winit event level,
     // so we can ignore virtual repeat key presses
@@ -207,40 +214,46 @@ fn main() {
 
                 let current_time_seconds = start_time.elapsed().as_secs_f64();
 
-                let terrain_height = |x: f32, z: f32| {
-                    perlin.get([(x as f64) * 0.08, (z as f64 * 0.08), 0.015 * current_time_seconds]) as f32 * 2.0
-                };
-
                 // Lerp player position
                 camera.position = (1.0 - alpha) * game_state.previous_player_position
                     + alpha * game_state.player_position.coords;
 
                 // Hard-coded head height for now
-                camera.position.y = 2.0 + (terrain_height(camera.position.x, camera.position.z) as f32);
+                camera.position.y = 2.0;
 
                 renderer.begin_frame();
 
-                let num_cubes = 32768;
-                let dim = (num_cubes as f32).sqrt() as i32;
+                // Ground of cubes
+                {
+                    let num_cubes = 32768;
+                    let dim = (num_cubes as f32).sqrt() as i32;
 
-                for i in 0..num_cubes {
+                    for i in 0..num_cubes {
 
-                    let x = (i % dim) as f32;
-                    let z = (i / dim) as f32;
+                        let x = (i % dim) as f32 - 100.0;
+                        let z = (i / dim) as f32 - 100.0;
+                        let y = -0.5;
 
-                    let mut y = terrain_height(x, z) as f32;
+                        let mat_local = Matrix4::identity()
+                            .append_scaling(1.0)
+                            .append_translation(&Vector3::new(x, y, z));
 
-                    let mat_local = Matrix4::identity()
-                        .append_scaling(0.8)
-                        .append_translation(&Vector3::new(x, y, z));
+                        renderer.add_model(cube_model_id, mat_local);
+                    }
+                }
 
-                    renderer.add_model(cube_model_id, mat_local);
+                // Rigid bodies
+                for &h in &game_state.physics_world.rigid_body_handles {
+                    match game_state.physics_world.bodies.rigid_body(h) {
+                        Some(body) => {
+                            let mut mat_local = Matrix4::identity();
 
-                    if i % 100 == 0 {
-                        renderer.add_line(Point3::new(x - 0.15, y + 0.55, z - 0.15), Point3::new(x + 0.15, y + 0.55, z - 0.15), Vector3::new(1.0, 0.0, 0.0));
-                        renderer.add_line(Point3::new(x + 0.15, y + 0.55, z - 0.15), Point3::new(x + 0.15, y + 0.55, z + 0.15), Vector3::new(1.0, 0.0, 0.0));
-                        renderer.add_line(Point3::new(x + 0.15, y + 0.55, z + 0.15), Point3::new(x - 0.15, y + 0.55, z + 0.15), Vector3::new(1.0, 0.0, 0.0));
-                        renderer.add_line(Point3::new(x - 0.15, y + 0.55, z + 0.15), Point3::new(x - 0.15, y + 0.55, z - 0.15), Vector3::new(1.0, 0.0, 0.0));
+                            mat_local.append_scaling_mut(1.0);
+                            mat_local *= body.position().to_homogeneous();
+
+                            renderer.add_model(cube_model_id, mat_local);
+                        }
+                        None => continue
                     }
                 }
 

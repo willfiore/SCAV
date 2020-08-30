@@ -1,5 +1,9 @@
 # TODO
 
+- Test-bed map
+    - Physics system, rigid bodies for walls, etc
+    - Rendering system, flat walls being rendered
+
 ## Brain dump
 
 - Player movement controller

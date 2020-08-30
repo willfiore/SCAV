@@ -12,12 +12,12 @@ edition = "2018"
 ash = "0.31.0"
 
 # Logging
-log = "0.4.8"
+log = "0.4.11"
 simple_logger = "1.6.0"
 
 # Maths
-nalgebra = "0.21.0"
-nphysics3d = "0.15.0"
+nalgebra = "0.22.0"
+nphysics3d = "0.17.0"
 
 # Windowing
 winit = "0.22.2"
@@ -27,6 +27,7 @@ arrayvec = "0.5.1"
 array_tool = "1.0.3"
 noise = "0.6.0"
 rand = "0.7.3"
+downcast-rs = "1.2.0"
 
 [build-dependencies]
 # Shaders
@@ -34,7 +35,7 @@ shaderc-sys = "0.6.2"
 shaderc = "0.6.2"
 
 # OpenVR building
-bindgen = "0.53.2"
+bindgen = "0.55.1"
 
 [profile.release]
 debug = true

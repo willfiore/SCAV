@@ -71,7 +71,7 @@ version = "0.31.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c69a8137596e84c22d57f3da1b5de1d4230b1742a710091c85f4d7ce50f00f38"
 dependencies = [
- "libloading 0.6.3",
+ "libloading",
 ]
 
 [[package]]
@@ -99,9 +99,9 @@ checksum = "1b20b618342cf9891c292c4f5ac2cde7287cc5c87e87e9c769d617793607dec1"
 
 [[package]]
 name = "bindgen"
-version = "0.53.3"
+version = "0.55.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c72a978d268b1d70b0e963217e60fdabd9523a941457a6c42a7315d15c7e89e5"
+checksum = "75b13ce559e6433d360c26305643803cb52cfbabbc2b9c47ce04a58493dfb443"
 dependencies = [
  "bitflags",
  "cexpr",
@@ -190,13 +190,13 @@ dependencies = [
 
 [[package]]
 name = "clang-sys"
-version = "0.29.3"
+version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fe6837df1d5cba2397b835c8530f51723267e16abbf83892e9e5af4f0e5dd10a"
+checksum = "9da1484c6a890e374ca5086062d4847e0a2c1e5eba9afa5d48c09e8eb39b2519"
 dependencies = [
  "glob",
  "libc",
- "libloading 0.5.2",
+ "libloading",
 ]
 
 [[package]]
@@ -391,7 +391,7 @@ version = "0.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b11f15d1e3268f140f68d390637d5e76d849782d971ae7063e0da69fe9709a76"
 dependencies = [
- "libloading 0.6.3",
+ "libloading",
 ]
 
 [[package]]
@@ -650,16 +650,6 @@ checksum = "755456fae044e6fa1ebbbd1b3e902ae19e73097ed4ed87bb79934a867c007bc3"
 
 [[package]]
 name = "libloading"
-version = "0.5.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f2b111a074963af1d37a139918ac6d49ad1d0d5e47f72fd55388619691a7d753"
-dependencies = [
- "cc",
- "winapi 0.3.9",
-]
-
-[[package]]
-name = "libloading"
 version = "0.6.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2443d8f0478b16759158b2f66d525991a05491138bc05814ef52a250148ef4f9"
@@ -667,12 +657,6 @@ dependencies = [
  "cfg-if",
  "winapi 0.3.9",
 ]
-
-[[package]]
-name = "libm"
-version = "0.2.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c7d73b3f436185384286bd8098d17ec07c9a7d2388a6599f824d8502b529702a"
 
 [[package]]
 name = "line_drawing"
@@ -801,9 +785,9 @@ dependencies = [
 
 [[package]]
 name = "nalgebra"
-version = "0.21.1"
+version = "0.22.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d6b6147c3d50b4f3cdabfe2ecc94a0191fd3d6ad58aefd9664cf396285883486"
+checksum = "4a3f0b89b0a44cb7bb9b62c5e6fd485145ddc6bc14483ab005355e96029b3fbf"
 dependencies = [
  "approx",
  "generic-array",
@@ -819,9 +803,9 @@ dependencies = [
 
 [[package]]
 name = "ncollide3d"
-version = "0.23.2"
+version = "0.24.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bc05c110986c3e9d2028a865c8aa195739e4f720afcee2d4a3753dc11e0c4f46"
+checksum = "5d4ac20ca3005ba99e1778a36113a7d07e667cf460f0d43bb929be6f90278b27"
 dependencies = [
  "approx",
  "bitflags",
@@ -913,9 +897,9 @@ dependencies = [
 
 [[package]]
 name = "nphysics3d"
-version = "0.15.1"
+version = "0.17.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e600652f5c596402345c51abd8a81b8338fe3f89d640496a575fa6b62f7b3e9a"
+checksum = "a04a5a57bd2db97e2c808f73923ded83194bcf9509e9ace618610197c13fdb14"
 dependencies = [
  "approx",
  "bitflags",
@@ -1001,7 +985,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ac267bcc07f48ee5f8935ab0d24f316fb722d7a1292e2913f0cc196b29ffd611"
 dependencies = [
  "autocfg",
- "libm",
 ]
 
 [[package]]
@@ -1400,6 +1383,7 @@ dependencies = [
  "arrayvec",
  "ash",
  "bindgen",
+ "downcast-rs",
  "log",
  "nalgebra",
  "noise",
@@ -1500,9 +1484,9 @@ checksum = "7fdf1b9db47230893d76faad238fd6097fd6d6a9245cd7a4d90dbd639536bbd2"
 
 [[package]]
 name = "simba"
-version = "0.1.5"
+version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fb931b1367faadea6b1ab1c306a860ec17aaa5fa39f367d0c744e69d971a1fb2"
+checksum = "1585d831b5c904e42c4df7a4fcfa03e4b56a8cfa445aff0a04f4effe397ecac9"
 dependencies = [
  "approx",
  "num-complex",
