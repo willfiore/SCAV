@@ -13,11 +13,11 @@ ash = "0.31.0"
 
 # Logging
 log = "0.4.11"
-simple_logger = "1.6.0"
+simple_logger = "1.9.0"
 
 # Maths
 nalgebra = "0.22.0"
-nphysics3d = "0.17.0"
+rapier3d = "0.1.4"
 
 # Windowing
 winit = "0.22.2"

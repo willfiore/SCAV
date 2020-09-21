@@ -29,7 +29,6 @@ use std::time::{Duration, Instant};
 use winit::dpi::LogicalSize;
 use winit::event::{DeviceEvent, ElementState, VirtualKeyCode};
 use winit::window::Fullscreen;
-use nphysics3d::object::{RigidBody, BodySet};
 
 const LOGIC_TICK_DURATION: Duration = Duration::from_millis(20);
 const PLAYER_SPEED: f32 = 5.0;
@@ -243,18 +242,15 @@ fn main() {
                 }
 
                 // Rigid bodies
-                for &h in &game_state.physics_world.rigid_body_handles {
-                    match game_state.physics_world.bodies.rigid_body(h) {
-                        Some(body) => {
-                            let mut mat_local = Matrix4::identity();
+                for (idx, rb) in game_state.physics_world.bodies.iter() {
+                    if rb.is_static() { continue; }
 
-                            mat_local.append_scaling_mut(1.0);
-                            mat_local *= body.position().to_homogeneous();
+                    let mut mat_local = Matrix4::identity();
 
-                            renderer.add_model(cube_model_id, mat_local);
-                        }
-                        None => continue
-                    }
+                    mat_local.append_scaling_mut(1.0);
+                    mat_local *= rb.position.to_homogeneous();
+
+                    renderer.add_model(cube_model_id, mat_local);
                 }
 
                 renderer.end_frame(&camera);
