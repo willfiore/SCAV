@@ -554,7 +554,7 @@ fn create_pipelines(base_state: &BaseState) -> Result<PipelinesState, Box<dyn Er
     let shader_function_entry_point = CString::new("main")?;
 
     let vertex_shader_module = {
-        let mut spv_file = Cursor::new(&include_bytes!("../assets/shaders/generated/basic.vert.spv")[..]);
+        let mut spv_file = Cursor::new(&include_bytes!("../../assets/shaders/generated/basic.vert.spv")[..]);
         let code = ash::util::read_spv(&mut spv_file)?;
 
         let create_info = vk::ShaderModuleCreateInfo::builder()
@@ -569,7 +569,7 @@ fn create_pipelines(base_state: &BaseState) -> Result<PipelinesState, Box<dyn Er
         .name(&shader_function_entry_point);
 
     let fragment_shader_module = {
-        let mut spv_file = Cursor::new(&include_bytes!("../assets/shaders/generated/basic.frag.spv")[..]);
+        let mut spv_file = Cursor::new(&include_bytes!("../../assets/shaders/generated/basic.frag.spv")[..]);
         let code = ash::util::read_spv(&mut spv_file)?;
 
         let create_info = vk::ShaderModuleCreateInfo::builder()
@@ -725,7 +725,7 @@ fn create_pipelines(base_state: &BaseState) -> Result<PipelinesState, Box<dyn Er
 
         // Use debug vertex shader instead
         let vertex_shader_module = {
-            let mut spv_file = Cursor::new(&include_bytes!("../assets/shaders/generated/debug.vert.spv")[..]);
+            let mut spv_file = Cursor::new(&include_bytes!("../../assets/shaders/generated/debug.vert.spv")[..]);
             let code = ash::util::read_spv(&mut spv_file)
                 .expect("Failed to read vertex shader spv file");
 
