@@ -18,7 +18,7 @@ pub struct PhysicsWorld {
 
 impl PhysicsWorld {
     pub fn new() -> Self {
-        let mut physics_world = PhysicsWorld {
+        let mut w = PhysicsWorld {
             pipeline:     PhysicsPipeline::new(),
             gravity: Vector3::new(0.0, -9.81, 0.0),
             integration_parameters: IntegrationParameters::default(),
@@ -28,39 +28,38 @@ impl PhysicsWorld {
             colliders:    ColliderSet::new(),
             joints:       JointSet::new(),
             event_handler: ()
-            // rigid_body_handles: Vec::new(),
         };
+
+        w.integration_parameters.ccd_on_penetration_enabled = true;
 
         // Ground
         {
             let ground_size = 100.0;
             let ground_height = 0.1;
 
-            let rigid_body = RigidBodyBuilder::new_static()
+            let rb = RigidBodyBuilder::new_static()
                 .translation(0.0, 0.0, 0.0)
                 .build();
 
-            let ground_handle = physics_world.bodies.insert(rigid_body);
+            let ground_handle = w.bodies.insert(rb);
 
             let collider = ColliderBuilder::cuboid(
                 ground_size, ground_height, ground_size
             ).build();
 
-            physics_world.colliders.insert(collider, ground_handle, &mut physics_world.bodies);
-
-            // physics_world.rigid_body_handles.push(body);
+            w.colliders.insert(collider, ground_handle, &mut w.bodies);
         }
 
         // Cubes
         {
             let num = 6;
-            let rad = 0.5 - 0.005;
+            let rad = 0.5;
 
             let shift = rad * 2.5;
             let centerx = shift * (num as f32) / 2.0;
             let centery = shift / 2.0;
             let centerz = shift * (num as f32) / 2.0;
-            let height = 100.0;
+            let height = 10.0;
 
             for i in 0usize..num {
                 for j in 0usize..num {
@@ -74,9 +73,7 @@ impl PhysicsWorld {
                             .translation(x, y, z)
                             .build();
 
-                        let rb_handle = physics_world.bodies.insert(rb);
-
-                        // physics_world.rigid_body_handles.push(rb_handle);
+                        let rb_handle = w.bodies.insert(rb);
 
                         // Build the collider.
                         let co = ColliderBuilder::cuboid(rad, rad, rad)
@@ -84,13 +81,13 @@ impl PhysicsWorld {
                             .build();
 
                         // Insert the collider to the body set.
-                        physics_world.colliders.insert(co, rb_handle, &mut physics_world.bodies);
+                        w.colliders.insert(co, rb_handle, &mut w.bodies);
                     }
                 }
             }
         }
 
-        physics_world
+        w
     }
 
     pub fn set_timestep(&mut self, dt: f32) {

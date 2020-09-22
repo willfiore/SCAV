@@ -29,6 +29,7 @@ use std::time::{Duration, Instant};
 use winit::dpi::LogicalSize;
 use winit::event::{DeviceEvent, ElementState, VirtualKeyCode};
 use winit::window::Fullscreen;
+use simple_logger::SimpleLogger;
 
 const LOGIC_TICK_DURATION: Duration = Duration::from_millis(20);
 const PLAYER_SPEED: f32 = 5.0;
@@ -85,7 +86,7 @@ fn fixed_update(state: &mut GameState, input: &Input, camera: &Camera, tick: u64
 }
 
 fn main() {
-    simple_logger::init().expect("Failed to initialise logger");
+    SimpleLogger::new().init().unwrap();
 
     let event_loop = EventLoop::new();
 
@@ -95,8 +96,8 @@ fn main() {
     let window = WindowBuilder::new()
         .with_title("SCAV")
         .with_inner_size(LogicalSize {
-            width: 1280,
-            height: 720,
+            width: 1920,
+            height: 1080,
         })
         // .with_fullscreen(Some(fullscreen))
         .build(&event_loop)
@@ -124,8 +125,8 @@ fn main() {
 
     let mut camera = Camera::new();
 
-    // window.set_cursor_visible(false);
-    // window.set_cursor_grab(true).ok();
+    window.set_cursor_visible(false);
+    window.set_cursor_grab(true).ok();
 
     let perlin = Perlin::new();
 
